@@ -71,6 +71,32 @@ public static class Program
 		h.TimeData.Add(b.T); h.OpenData.Add(b.O); h.HighData.Add(b.H); h.LowData.Add(b.L); h.CloseData.Add(b.C); h.VolumeData.Add(b.V);
 	}
 
+	// Runs a historical load and returns the last status-box text drawn
+	private static string RunStatusOnly(List<BarData> data, bool enableOrders)
+	{
+		DrawingLog.Calls.Clear();
+		Harness h = NewHarness(false);
+		h.PrintTradeList = false;
+		h.EnableOrders = enableOrders;
+		h.ShowTvFills = false;
+		h.ShowSignals = false;
+		h.ShowTradeLines = false;
+		h.Step(State.Configure);
+		h.Step(State.DataLoaded);
+		h.State = State.Historical;
+		h.Bars.Count = data.Count;
+		for (int i = 0; i < data.Count; i++)
+		{
+			Push(h, data[i]);
+			h.CurrentBar = i;
+			h.IsFirstTickOfBar = true;
+			h.Bar();
+		}
+		// only the final redraw counts (not ones made on order bars)
+		string last = DrawingLog.Calls.Where(c => c.StartsWith("TextFixed ")).LastOrDefault();
+		return last ?? "";
+	}
+
 	private static int failures;
 	private static void Check(bool ok, string what)
 	{
@@ -96,6 +122,7 @@ public static class Program
 		a.Step(State.Configure);
 		a.Step(State.DataLoaded);
 		a.State = State.Historical;
+		a.Bars.Count = n;
 		for (int i = 0; i < n; i++)
 		{
 			Push(a, bars[i]);
@@ -180,6 +207,19 @@ public static class Program
 		for (int i = 0; same && i < t1.Count; i++)
 			same = t1[i].EntryBar == t2[i].EntryBar && t1[i].ExitBar == t2[i].ExitBar && t1[i].ExitSignal == t2[i].ExitSignal && t1[i].EntryPrice == t2[i].EntryPrice;
 		Check(same, "OnEachTick realtime processing gives the same trades as OnBarClose");
+
+		// ---- Status box: always visible after the historical load, and explains an empty chart ----
+		string lastBox = DrawingLog.Calls.Where(c => c.StartsWith("TextFixed ")).LastOrDefault() ?? "";
+		Check(a.Printed.Any(p => p.Contains("started on")), "prints a 'started' line when data is loaded");
+		Check(a.Printed.Any(p => p.Contains("Since bar 200")), "prints the filter diagnostics at the end of the historical load");
+
+		Check(RunStatusOnly(bars.Take(150).ToList(), false).Contains("NOT ENOUGH DATA"), "status box says NOT ENOUGH DATA with 150 bars");
+		List<BarData> flat = bars.Select(x => { BarData y = x; y.V = 1; return y; }).ToList();
+		string flatBox = RunStatusOnly(flat, false);
+		Check(flatBox.Contains("NO VOLUME") && flatBox.Contains("Closed trades: 0"), "status box explains zero trades on data without volume");
+		Check(RunStatusOnly(bars, false).Contains("Bars processed: " + n), "status box drawn on the last historical bar with no order on it");
+
+		Console.WriteLine("Status box: " + lastBox);
 
 		Console.WriteLine(failures == 0 ? "ALL C# CHECKS PASSED" : failures + " C# CHECK(S) FAILED");
 		return failures == 0 ? 0 : 1;

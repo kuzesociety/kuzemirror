@@ -15,7 +15,12 @@ The martingale and leverage parts are removed. Nothing in the entry or exit logi
 
 1. Copy `RutaCryptoMirror.cs` to `Documents\NinjaTrader 8\bin\Custom\Strategies\`.
 2. In NinjaTrader, open **New → NinjaScript Editor**, open any strategy and press **F5** to compile. The file uses only C# 5 syntax, which is what NinjaTrader 8's compiler accepts.
-3. Open a chart and use **Strategies… → RutaCryptoMirror**. Enable it. Historical trades are drawn right away.
+3. Open a chart and use **Strategies… → RutaCryptoMirror**. Tick the **Enabled** box, then **OK**. NinjaTrader adds strategies *disabled*, and a disabled strategy draws nothing. Once enabled, historical trades are drawn right away. A status box appears at the bottom-left of the chart.
+
+**Nothing on the chart?**
+* No status box at the bottom-left: the strategy is not running. Check the **Enabled** box. Then look at **Control Center → Log** for a red line mentioning RutaCryptoMirror.
+* Status box but no trades: its last line says why: `NOT ENOUGH DATA` (load more days), `NO VOLUME` (this instrument's data has no real volume), the RSI never crossed its levels, or the other filters rejected every cross.
+* **New → NinjaScript Output** shows a `started on …` line and the same diagnosis when loading finishes.
 
 Chart setup for a fair comparison:
 
@@ -78,7 +83,7 @@ Even then, two data vendors rarely build exactly the same bar volumes (block tra
 | **Sell** / **Buy** box | The two `plotshape()` signals |
 | `-1` / `Short`, `Take Profit` / `+1`, and a diamond | TradingView's order markers. The diamond is at the **TradingView fill price** (the bar close). Reversals show the full order size, like `-47.2` on TradingView. |
 | Dotted green/red line | Entry → exit of each TradingView trade (win / loss) |
-| Box at bottom left | Trades, win rate, net points, profit factor and open position, all computed with TradingView's fill-at-close rule |
+| Box at bottom left | Bars processed, trades, win rate, net points, profit factor and open position, all computed with TradingView's fill-at-close rule. The last line counts RSI crosses and Buy/Sell signals, and says which filter blocked trading when there are none. |
 | NinjaTrader's own execution markers | The real NinjaTrader orders. They fill one tick later (in backtests: the next bar's open). Named `Long`/`Short`/`Take Profit`/`Stop Loss` like on TradingView; a reversal appears as NinjaTrader's automatic `Close position` plus the new entry. |
 
 Turn **Enable Orders** off to use it as a pure "TradingView trades" indicator.

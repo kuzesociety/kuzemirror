@@ -152,6 +152,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 				signalFont = new SimpleFont("Arial", 10);
 				statsFont = new SimpleFont("Arial", 12);
 				barsCsv = null;
+				Print(Name + " started on " + Instrument.FullName + " " + BarsPeriod.Value + " " + BarsPeriod.BarsPeriodType + " - status box at the bottom-left of the chart when loading finishes.");
 				if (ExportBarsCsv)
 				{
 					barsCsv = new StringBuilder();
@@ -161,7 +162,10 @@ namespace NinjaTrader.NinjaScript.Strategies
 			else if (State == State.Transition)
 			{
 				if (engine != null)
+				{
 					Print(Name + " " + Instrument.FullName + " historical TV-mirror result: " + engine.SummaryLine());
+					Print(Name + " " + engine.DiagnosticText(BarsRequiredToTrade).Replace("\n", " | "));
+				}
 				WriteCsvFiles();
 			}
 			else if (State == State.Terminated)
@@ -268,8 +272,11 @@ namespace NinjaTrader.NinjaScript.Strategies
 			if (r.ClosedTrade != null && PrintTradeList)
 				Print(FormatTradeLine(r.ClosedTrade));
 
-			if (ShowStats && (r.EntryDirection != 0 || r.ExitComment != null))
-				Draw.TextFixed(this, TagPrefix + "stats", engine.StatsText(), TextPosition.BottomLeft, Brushes.White, statsFont, Brushes.Gray, Brushes.Black, 70);
+			// Status box: on every order, on the last historical bars and on every live bar, so it is
+			// visible even when there are no trades (it then says which filter blocked them).
+			bool lastHistoricalBar = State == State.Historical && CurrentBar >= Bars.Count - 2;
+			if (ShowStats && (State != State.Historical || lastHistoricalBar || r.EntryDirection != 0 || r.ExitComment != null))
+				Draw.TextFixed(this, TagPrefix + "stats", engine.StatsText(BarsRequiredToTrade), TextPosition.BottomLeft, Brushes.White, statsFont, Brushes.Gray, Brushes.Black, 70);
 		}
 
 		// TradingView style order marker: sells above the bar ("-qty" over the name), buys below
@@ -429,6 +436,10 @@ namespace NinjaTrader.NinjaScript.Strategies
 			private int wins;
 			private double grossProfitPts, grossLossPts, netMoney;
 
+			// Diagnostics for the status box, so an empty chart explains itself
+			private int barsSeen, rsiCrossUps, rsiCrossDowns, buySignals, sellSignals;
+			private double minVolume = double.MaxValue, maxVolume = double.MinValue, lastRsi = double.NaN;
+
 			public TvEngine(Settings settings)
 			{
 				s = settings;
@@ -473,6 +484,11 @@ namespace NinjaTrader.NinjaScript.Strategies
 				bool crossDown = rsi1 < s.RsiUpper && rsiPrev >= s.RsiUpper;
 				rsiPrev = rsi1;
 
+				barsSeen++;
+				lastRsi = rsi1;
+				minVolume = Math.Min(minVolume, volume);
+				maxVolume = Math.Max(maxVolume, volume);
+
 				bool longCond = hclose > hopen && crossUp && osc > s.VolumeThreshold && close > trend;
 				bool shortCond = hclose < hopen && crossDown && osc > s.VolumeThreshold && close < trend;
 
@@ -498,6 +514,14 @@ namespace NinjaTrader.NinjaScript.Strategies
 				r.QtyBefore = positionQty;
 				r.BuySignal = longCond && pos <= 0;
 				r.SellSignal = shortCond && pos >= 0;
+
+				if (canTrade)
+				{
+					if (crossUp) rsiCrossUps++;
+					if (crossDown) rsiCrossDowns++;
+					if (r.BuySignal) buySignals++;
+					if (r.SellSignal) sellSignals++;
+				}
 
 				// Long Entry / Short Entry blocks: overwrite the levels first...
 				int entryDir = 0;
@@ -632,20 +656,40 @@ namespace NinjaTrader.NinjaScript.Strategies
 					grossLossPts > 0 ? (grossProfitPts / grossLossPts).ToString("0.00", CultureInfo.InvariantCulture) : "n/a");
 			}
 
-			public string StatsText()
+			public string StatsText(int barsRequired)
 			{
 				int n = trades.Count;
 				StringBuilder sb = new StringBuilder();
-				sb.AppendLine("TradingView mirror (fills at bar close)");
+				sb.AppendLine("RutaCryptoMirror - TradingView mirror (fills at bar close)");
+				sb.AppendLine(string.Format(CultureInfo.InvariantCulture, "Bars processed: {0}   (trades allowed from bar {1})", barsSeen, barsRequired));
 				sb.AppendLine(string.Format(CultureInfo.InvariantCulture, "Closed trades: {0}   Win rate: {1:0.0}%", n, n > 0 ? 100.0 * wins / n : 0.0));
-				sb.AppendLine(string.Format(CultureInfo.InvariantCulture, "Net: {0:+0.00;-0.00} pts x contracts   ${1:0.00}", grossProfitPts - grossLossPts, netMoney));
-				sb.AppendLine("Profit factor: " + (grossLossPts > 0 ? (grossProfitPts / grossLossPts).ToString("0.00", CultureInfo.InvariantCulture) : "n/a"));
+				sb.AppendLine(string.Format(CultureInfo.InvariantCulture, "Net: {0:+0.00;-0.00} pts x contracts   ${1:0.00}   Profit factor: {2}", grossProfitPts - grossLossPts, netMoney,
+					grossLossPts > 0 ? (grossProfitPts / grossLossPts).ToString("0.00", CultureInfo.InvariantCulture) : "n/a"));
 				if (position == 0)
-					sb.Append("Position: flat");
+					sb.AppendLine("Position: flat");
 				else
-					sb.Append(string.Format(CultureInfo.InvariantCulture, "Position: {0} {1} @ {2}   SL {3:0.00}   TP {4:0.00}",
+					sb.AppendLine(string.Format(CultureInfo.InvariantCulture, "Position: {0} {1} @ {2}   SL {3:0.00}   TP {4:0.00}",
 						position > 0 ? "Long" : "Short", positionQty, positionPrice, stopLossLevel, profitTarget));
+				sb.Append(DiagnosticText(barsRequired));
 				return sb.ToString();
+			}
+
+			// Which filter is stopping trades, in plain words
+			public string DiagnosticText(int barsRequired)
+			{
+				string text = string.Format(CultureInfo.InvariantCulture,
+					"Since bar {0}: RSI crossed up {1}: {2}x, crossed down {3}: {4}x -> Buy signals {5}, Sell signals {6}   (RSI now {7})",
+					barsRequired, s.RsiLower, rsiCrossUps, s.RsiUpper, rsiCrossDowns, buySignals, sellSignals,
+					double.IsNaN(lastRsi) ? "n/a" : lastRsi.ToString("0.0", CultureInfo.InvariantCulture));
+				if (barsSeen <= barsRequired)
+					return text + string.Format(CultureInfo.InvariantCulture, "\nNOT ENOUGH DATA: only {0} bars loaded, the first {1} are warm-up. Load more days on the chart.", barsSeen, barsRequired);
+				if (maxVolume <= minVolume)
+					return text + string.Format(CultureInfo.InvariantCulture, "\nNO VOLUME: every bar has volume {0}. The RSI of the volume MA and the volume oscillator can never trigger on this data.", minVolume);
+				if (rsiCrossUps + rsiCrossDowns == 0)
+					return text + "\nThe RSI never crossed its levels. Check RSI Source / RSI Length / Volume MA Length.";
+				if (buySignals + sellSignals == 0)
+					return text + "\nThe RSI crossed, but the Heikin Ashi / volume oscillator / SMA filters rejected every cross.";
+				return text;
 			}
 
 			private static PineMa CreateMa(RutaMirrorMaType type, int length)

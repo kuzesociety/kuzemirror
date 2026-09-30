@@ -64,7 +64,7 @@ namespace NinjaTrader.Data
 {
 	public enum BarsPeriodType { Tick, Volume, Range, Second, Minute, Day, Week, Month, Year }
 	public class BarsPeriod { public BarsPeriodType BarsPeriodType { get; set; } public int Value { get; set; } }
-	public class Bars { public bool IsTickReplay { get; set; } }
+	public class Bars { public bool IsTickReplay { get; set; } public int Count { get; set; } }
 }
 namespace NinjaTrader.Core
 {
@@ -199,7 +199,7 @@ namespace NinjaTrader.NinjaScript.DrawingTools
 
 		public static TextFixed TextFixed(NinjaScriptBase owner, string tag, string text, TextPosition textPosition, Brush textBrush,
 			SimpleFont font, Brush outlineBrush, Brush areaBrush, int areaOpacity)
-		{ DrawingLog.Calls.Add("TextFixed " + tag); return null; }
+		{ DrawingLog.Calls.Add("TextFixed " + tag + " " + text.Replace("\n", "|")); return null; }
 
 		public static Diamond Diamond(NinjaScriptBase owner, string tag, bool isAutoScale, int barsAgo, double y, Brush brush)
 		{ DrawingLog.Calls.Add("Diamond " + tag + " " + y); return null; }
