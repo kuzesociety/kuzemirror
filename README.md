@@ -44,7 +44,7 @@ Chart setup for a fair comparison:
 | RSI Longitud | RSI Length | **14** (the code default is 12; your chart uses 14) |
 | `atr(14)`, `sma(close, 10)` (hard-coded) | ATR Length / Trend SMA Length | 14 / 10 |
 | Lookback Candles = 7 | *(not ported: the Pine code never uses it)* | |
-| *(new, not in Pine)* | Stop/Target Units, Stop Loss ($), Take Profit ($), Exit Execution | AtrMultiple, 1000, 1000, OnBarClose = TradingView. See section 9. |
+| *(new, not in Pine)* | Stop/Target Units (AtrMultiple / Dollars / DollarsSizedByAtr), Stop Loss ($), Take Profit ($), Exit Execution | AtrMultiple, 1000, 1000, OnBarClose = TradingView. See section 9. |
 
 **Check the Volume MA length.** The RSI source is the *Volume MA line of TradingView's Volume indicator*. The `Vol. 10` in the volume pane suggests MA length 10. Open that indicator's settings and put the same length in `Volume MA Length`. If the source dropdown actually says `Vol.: Volume` and not `Volume MA`, set RSI Source = `Volume`.
 
@@ -183,6 +183,25 @@ With ATR exits, size never changes *when* or *at what price* it trades.
 
 So with a fixed number of contracts, optimizing the dollars *is* optimizing the stop/target distance. The difference from ATR: a fixed distance ignores volatility. 25 points is wide in the overnight session and narrow at the 9:30 open. The optimizer can tell you which works better on your data.
 
+### Fixed $ stop and target, contracts sized by ATR (recommended for fixed $)
+
+**Stop/Target Units = DollarsSizedByAtr** keeps the loss at *Stop Loss ($)* and the win at *Take Profit ($)* on every trade, and lets ATR choose the size:
+
+1. contracts = floor(Stop Loss $ / (Stop Loss ATR Multiplier × ATR × point value)), between 1 and *Max Contracts*;
+2. stop and target are placed so that this many contracts lose exactly Stop Loss $ / win exactly Take Profit $ (rounded to the tick).
+
+Quiet market: tight stop, more contracts. Fast market: wide stop, fewer contracts. Same dollars either way. *Stop Loss ATR Multiplier* now only sets roughly how wide the stop should be.
+
+**This needs MNQ, not NQ.** Size can only change in whole contracts. With a $1000 stop and a 2 ATR stop:
+
+| 5-min ATR | Ideal stop | NQ ($20/pt) | MNQ ($2/pt) |
+|---|---|---|---|
+| 10 pts | 20 pts | 2 contracts → stop forced to 25 pts | 25 contracts → 20 pts |
+| 20 pts | 40 pts | 1 contract → stop forced to 50 pts | 12 contracts → 41.75 pts |
+| 40 pts | 80 pts | can't size below 1 → stop forced to 50 pts | 6 contracts → 83.25 pts |
+
+On NQ the size barely changes, so the stop ends up wherever the dollars put it. On MNQ it follows the ATR closely. Raise **Max Contracts** for MNQ: quiet overnight bars can need 25–50 MNQ for $1000 of risk. When the cap (or the 1-contract minimum) is hit, the dollars stay fixed and the stop moves off the ATR distance. The stats box and the setup report show *Contracts per entry: min / max / avg* and how often each limit was hit.
+
 **Exit Execution**:
 * `OnBarClose` (TradingView): exits at the close once price is past the level. A "$500" stop can lose more on a fast bar.
 * `StopTargetOrders`: real stop and target orders (OCO) at the exact levels. A stop fills at the level, or worse only on a gap. If one bar touches both levels, the chart markers and stats box assume the stop filled first; NinjaTrader's backtest decides on its own.
@@ -205,7 +224,7 @@ So with a fixed number of contracts, optimizing the dollars *is* optimizing the 
 * compiles the shipped `RutaCryptoMirror.cs` as **C# 5**, NinjaTrader 8's language level, against stand-ins for the NinjaTrader API;
 * runs it on 6 synthetic 5-minute datasets and checks that every TradingView fill produces exactly one NinjaTrader order on the same bar, and that `Calculate = OnEachTick` gives the same trades as `OnBarClose`;
 * recomputes everything with an independent Python version of the Pine script. Result: **0 mismatches over 36,000 bars and 295 trades**, on every indicator value, both conditions, the position, and every entry and exit time, price and reason.
-* recomputes the dollar-exit modes ($500 stop / $1000 target, both on-close and with stop/target orders): same trades, setups and report rows;
+* recomputes the dollar-exit modes ($500 stop / $1000 target, both on-close and with stop/target orders) and the ATR-sized mode (MNQ, $1000 / $1500, capped at 12): same trades, contract counts, setups and report rows;
 * recomputes the setup report the same way: all 848 RSI-trigger setups (filters, blocker, outcome, R) and every report row match. A run with the SMA filter switched off matches too. Every real TP/SL trade has the same hindsight outcome as its setup.
 
 This proves the C# follows the Pine script exactly. It does not replace the real side-by-side check in section 3: neither TradingView nor NinjaTrader can run in this environment, so the compile was against stand-ins, not NinjaTrader itself.

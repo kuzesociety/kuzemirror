@@ -119,7 +119,7 @@ def intrabar(d, stop, target, o, h, l):
 
 
 def run(bars, use_ha=True, use_vol=True, use_sma=True, units='atr', execution='close',
-        sl_usd=1000.0, tp_usd=1000.0, qty=1, pv=20.0, tick=0.25):
+        sl_usd=1000.0, tp_usd=1000.0, qty=1, pv=20.0, tick=0.25, max_qty=10):
     o = [b['open'] for b in bars]
     h = [b['high'] for b in bars]
     l = [b['low'] for b in bars]
@@ -148,9 +148,17 @@ def run(bars, use_ha=True, use_vol=True, use_sma=True, units='atr', execution='c
     longcond = [ha_ok[1][i] and trig[1][i] and vol_ok[i] and sma_ok[1][i] for i in range(n)]
     shortcond = [ha_ok[-1][i] and trig[-1][i] and vol_ok[i] and sma_ok[-1][i] for i in range(n)]
 
+    def contracts(i):
+        if units != 'usd_atr':
+            return qty
+        if na(a[i]) or not a[i] * P['sl'] * pv > 0:
+            return 1
+        q = math.floor(sl_usd / (a[i] * P['sl'] * pv))     # contracts for a ~sl ATR stop
+        return max_qty if q > max_qty else 1 if q < 1 else int(q)
+
     def dist(i, which):
-        if units == 'usd':
-            return usd_to_points(sl_usd if which == 'sl' else tp_usd, qty, pv, tick)
+        if units in ('usd', 'usd_atr'):
+            return usd_to_points(sl_usd if which == 'sl' else tp_usd, contracts(i), pv, tick)
         return a[i] * P[which]
 
     # --- script execution + broker emulator (process_orders_on_close=true) ---
@@ -158,12 +166,13 @@ def run(bars, use_ha=True, use_vol=True, use_sma=True, units='atr', execution='c
     entry_bar = entry_px = None
     tp = sl = NA
     trades, pos_before, entry_dir = [], [], [0] * n
+    pos_qty = 0
     for i in range(n):
         if execution == 'orders' and position != 0:
             res, fill = intrabar(position, sl, tp, o[i], h[i], l[i])
             if res:
                 trades.append((entry_bar, 'Long' if position > 0 else 'Short', entry_px, i,
-                               'Stop Loss' if res < 0 else 'Take Profit', fill))
+                               'Stop Loss' if res < 0 else 'Take Profit', fill, pos_qty))
                 position = 0
         lc = longcond[i] and i >= WARMUP
         sc = shortcond[i] and i >= WARMUP
@@ -190,17 +199,18 @@ def run(bars, use_ha=True, use_vol=True, use_sma=True, units='atr', execution='c
         for kind, name, side in orders:
             if kind == 'entry':
                 if position != 0 and (position > 0) != (side > 0):
-                    trades.append((entry_bar, 'Long' if position > 0 else 'Short', entry_px, i, name, c[i]))
+                    trades.append((entry_bar, 'Long' if position > 0 else 'Short', entry_px, i, name, c[i], pos_qty))
                     position = 0
                 if position == 0:
-                    position = side        # 1 contract
+                    position = side        # direction; size in pos_qty
+                    pos_qty = contracts(i)
                     entry_bar, entry_px = i, c[i]
                     entry_dir[i] = side
             else:
                 # a close order can only reduce the position it was placed against; if that position
                 # was reversed by an earlier order of this bar, it is cancelled
                 if position != 0 and (position > 0) == (side < 0):
-                    trades.append((entry_bar, 'Long' if position > 0 else 'Short', entry_px, i, name, c[i]))
+                    trades.append((entry_bar, 'Long' if position > 0 else 'Short', entry_px, i, name, c[i], pos_qty))
                     position = 0
 
     # --- setup report: every bar/side followed forward with the SL/TP-on-close rule ---
@@ -262,7 +272,12 @@ def read_csv(path):
 def load_trades(path):
     rows = read_csv(path)
     return [(rows[k]['NT bar time (close)'], rows[k]['Type'].split()[1], float(rows[k]['Price']),
-             rows[k + 1]['NT bar time (close)'], rows[k + 1]['Signal'], float(rows[k + 1]['Price'])) for k in range(0, len(rows), 2)]
+             rows[k + 1]['NT bar time (close)'], rows[k + 1]['Signal'], float(rows[k + 1]['Price']), int(rows[k + 1]['Contracts']))
+            for k in range(0, len(rows), 2)]
+
+
+def ref_trade_rows(ref, times):
+    return [(times[eb], side, ep, times[xb], sig, xp, q) for (eb, side, ep, xb, sig, xp, q) in ref['trades']]
 
 
 def load_setups(path):
@@ -319,14 +334,9 @@ def main(d):
                 print('position mismatch bar', i, row['position_sign'], ref['pos'][i])
     print('per-bar values: %d bars, %d mismatches, max rel. error %s' % (len(nt), bad, {k: '%.1e' % v for k, v in worst.items()}))
 
-    ntt = read_csv(d + '/nt_trades.csv')
-    nt_trades = []
-    for k in range(0, len(ntt), 2):
-        e, x = ntt[k], ntt[k + 1]
-        nt_trades.append((e['NT bar time (close)'], e['Type'].split()[1], float(e['Price']),
-                          x['NT bar time (close)'], x['Signal'], float(x['Price'])))
+    nt_trades = load_trades(d + '/nt_trades.csv')
     # bars_input.csv holds NinjaTrader bar (close) timestamps
-    ref_trades = [(times[eb], side, ep, times[xb], sig, xp) for (eb, side, ep, xb, sig, xp) in ref['trades']]
+    ref_trades = ref_trade_rows(ref, times)
     same = nt_trades == ref_trades
     print('trades: C# %d, Python %d, identical: %s' % (len(nt_trades), len(ref_trades), same))
     if not same:
@@ -359,18 +369,17 @@ def main(d):
 
     # filter switch: SMA trend filter off
     ref2 = run(bars, use_sma=False)
-    ntt2 = read_csv(d + '/nt_trades_nosma.csv')
-    nt2 = [(ntt2[k]['NT bar time (close)'], ntt2[k]['Type'].split()[1], float(ntt2[k]['Price']),
-            ntt2[k + 1]['NT bar time (close)'], ntt2[k + 1]['Signal'], float(ntt2[k + 1]['Price'])) for k in range(0, len(ntt2), 2)]
-    rt2 = [(times[eb], side, ep, times[xb], sig, xp) for (eb, side, ep, xb, sig, xp) in ref2['trades']]
+    nt2 = load_trades(d + '/nt_trades_nosma.csv')
+    rt2 = ref_trade_rows(ref2, times)
     switch_ok = nt2 == rt2
     print('SMA filter off: C# %d trades, Python %d, identical: %s' % (len(nt2), len(rt2), switch_ok))
 
     modes_ok = True
     for suffix, kw in (('usd_close', dict(units='usd', sl_usd=500.0, tp_usd=1000.0)),
-                       ('usd_orders', dict(units='usd', sl_usd=500.0, tp_usd=1000.0, execution='orders'))):
+                       ('usd_orders', dict(units='usd', sl_usd=500.0, tp_usd=1000.0, execution='orders')),
+                       ('usd_atr', dict(units='usd_atr', sl_usd=1000.0, tp_usd=1500.0, execution='orders', pv=2.0, max_qty=12))):
         refm = run(bars, **kw)
-        t_ok = load_trades(d + '/nt_trades_%s.csv' % suffix) == [(times[eb], side, ep, times[xb], sig, xp) for (eb, side, ep, xb, sig, xp) in refm['trades']]
+        t_ok = load_trades(d + '/nt_trades_%s.csv' % suffix) == ref_trade_rows(refm, times)
         s_ok = load_setups(d + '/nt_setups_%s.csv' % suffix) == [(times[i], sd, h_, v_, s_, p_, t_, bl, oc, '' if rb is None else times[rb], rr)
                                                                    for (i, sd, h_, v_, s_, p_, t_, bl, oc, rb, rr) in refm['setups']]
         b_ok = buckets_match(d + '/nt_buckets_%s.csv' % suffix, refm['buckets'])

@@ -115,6 +115,7 @@ public static class Program
 			h.IsFirstTickOfBar = true;
 			h.Bar();
 		}
+		h.Step(State.Transition);
 		h.Step(State.Terminated);
 		string csvDir = Path.Combine(NinjaTrader.Core.Globals.UserDataDir, "RutaCryptoMirror");
 		File.Copy(Path.Combine(csvDir, "NQ_12-26_5Minute_trades.csv"), Path.Combine(outDir, "nt_trades_" + suffix + ".csv"), true);
@@ -304,6 +305,24 @@ public static class Program
 		Check(entries > 0 && stops == entries && targets == entries, "stop/target orders: SetStopLoss + SetProfitTarget (Price) before every entry");
 		Check(!usdOrders.Orders.Any(o => o.Contains(" ExitLong ") || o.Contains(" ExitShort ")), "stop/target orders: no on-close exit orders are sent");
 		Check(!a.Orders.Any(o => o.Contains("SetStopLoss") || o.Contains("SetProfitTarget")), "TradingView mode never sends stop/target orders");
+
+		// ---- Fixed $ with ATR sizing: MNQ ($2/pt), $1000 stop / $1500 target, contracts for a ~2 ATR stop, cap 12 ----
+		Harness usdAtr = RunCustom(bars, h => { h.Instrument.MasterInstrument.PointValue = 2; h.ExitUnits = RutaMirrorExitUnits.DollarsSizedByAtr;
+			h.StopLossDollars = 1000; h.TakeProfitDollars = 1500; h.MaxContracts = 12; h.ExitExecution = RutaMirrorExitExecution.StopTargetOrders; }, outDir, "usd_atr");
+		List<RutaCryptoMirror.TvEngine.TvTrade> ua = usdAtr.EngineForTest.Trades;
+		Check(ua.Select(t => t.Qty).Distinct().Count() > 1, "ATR sizing: contract count changes with volatility (" + string.Join(",", ua.Select(t => t.Qty).Distinct().OrderBy(q => q).Select(q => q.ToString()).ToArray()) + ")");
+		Check(ua.Any(t => t.Qty == 12), "ATR sizing: Max Contracts cap is applied");
+		// with q contracts the tick-rounded stop is within 0.125 pt x q x $2 of the $ amount; more only on a gap
+		Check(ua.Where(t => t.ExitSignal == "Stop Loss").All(t => (t.EntryPrice - t.ExitPrice) * t.Direction * t.Qty * 2 >= 1000 - 0.25 * t.Qty - 1e-9),
+			"ATR sizing: every stop loses ~$1000 (never less)");
+		Check(ua.Where(t => t.ExitSignal == "Stop Loss").Count(t => Math.Abs((t.EntryPrice - t.ExitPrice) * t.Direction * t.Qty * 2 - 1000) <= 0.25 * t.Qty + 1e-9)
+			>= ua.Count(t => t.ExitSignal == "Stop Loss") * 8 / 10, "ATR sizing: most stops lose $1000 +- tick rounding");
+		Check(ua.Where(t => t.ExitSignal == "Take Profit").All(t => (t.ExitPrice - t.EntryPrice) * t.Direction * t.Qty * 2 >= 1500 - 0.25 * t.Qty - 1e-9),
+			"ATR sizing: every target wins ~$1500");
+		Check(usdAtr.Orders.Where(o => o.Contains(" EnterLong ") || o.Contains(" EnterShort ")).All(o => int.Parse(o.Split(' ')[2]) >= 1 && int.Parse(o.Split(' ')[2]) <= 12),
+			"ATR sizing: NinjaTrader entry orders carry the sized quantity");
+		string sizeLine = usdAtr.Printed.FirstOrDefault(p => p.Contains("Contracts per entry")) ?? "";
+		Check(sizeLine.Length > 0, "setup report prints the contracts-per-entry line: " + sizeLine.Trim());
 
 		Console.WriteLine(failures == 0 ? "ALL C# CHECKS PASSED" : failures + " C# CHECK(S) FAILED");
 		return failures == 0 ? 0 : 1;

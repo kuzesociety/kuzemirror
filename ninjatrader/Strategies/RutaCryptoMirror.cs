@@ -542,6 +542,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 			// Diagnostics for the status box, so an empty chart explains itself
 			private int barsSeen, rsiCrossUps, rsiCrossDowns, buySignals, sellSignals;
 			private double minVolume = double.MaxValue, maxVolume = double.MinValue, lastRsi = double.NaN;
+			private int sizedEntries, sumEntryQty, minEntryQty = int.MaxValue, maxEntryQty, entriesCapped, entriesRaised;
 
 			public TvEngine(Settings settings)
 			{
@@ -654,7 +655,8 @@ namespace NinjaTrader.NinjaScript.Strategies
 
 				// Long Entry / Short Entry blocks: overwrite the levels first...
 				int entryDir = 0;
-				int newQty = ComputeQty(atrValue);
+				int sizeLimit;
+				int newQty = ComputeQty(atrValue, out sizeLimit);
 				double slDist = StopDistance(atrValue, newQty);		// ATR mode: atr * sl_multiplier, exactly as Pine
 				double tpDist = TargetDistance(atrValue, newQty);
 				if (longCond && pos <= 0)
@@ -688,6 +690,12 @@ namespace NinjaTrader.NinjaScript.Strategies
 					// The script's close_all calls on this bar are always true on a reversal bar (the levels
 					// were just overwritten) and TradingView drops them - the position ends up reversed.
 					r.EntryOrderQty = newQty + (pos != 0 ? positionQty : 0);
+					sizedEntries++;
+					sumEntryQty += newQty;
+					minEntryQty = Math.Min(minEntryQty, newQty);
+					maxEntryQty = Math.Max(maxEntryQty, newQty);
+					if (sizeLimit > 0) entriesCapped++;
+					if (sizeLimit < 0) entriesRaised++;
 					if (pos != 0)
 						r.ClosedTrade = CloseTrade(barIndex, time, close, entryDir > 0 ? "Long" : "Short");
 					position = entryDir;
@@ -870,11 +878,14 @@ namespace NinjaTrader.NinjaScript.Strategies
 			public List<string> SetupReport()
 			{
 				List<string> lines = new List<string>();
-				double sl = s.ExitUnits == RutaMirrorExitUnits.Dollars ? s.StopLossDollars : s.SlAtrMult;
-				double tp = s.ExitUnits == RutaMirrorExitUnits.Dollars ? s.TakeProfitDollars : s.TpAtrMult;
+				double sl = s.ExitUnits != RutaMirrorExitUnits.AtrMultiple ? s.StopLossDollars : s.SlAtrMult;
+				double tp = s.ExitUnits != RutaMirrorExitUnits.AtrMultiple ? s.TakeProfitDollars : s.TpAtrMult;
 				lines.Add(string.Format(CultureInfo.InvariantCulture,
 					"SETUP REPORT (hindsight): every possible entry at the bar close, exited by the strategy's own rule ({0}). Break-even win rate ~{1:0.0}%. avg R > 0 = that group makes money.",
 					ExitRuleText(), 100.0 * sl / (sl + tp)));
+				string sizeStats = SizeStatsText();
+				if (sizeStats != null)
+					lines.Add("  " + sizeStats);
 				for (int b = 0; b < BucketNames.Length; b++)
 					lines.Add(string.Format(CultureInfo.InvariantCulture, "  {0,-38} | LONG  {1} | SHORT  {2}",
 						BucketNames[b], FormatBucket(buckets[b, 0]), FormatBucket(buckets[b, 1])));
@@ -931,12 +942,12 @@ namespace NinjaTrader.NinjaScript.Strategies
 			// Stop / target distance in points for a new position of 'qty' contracts
 			private double StopDistance(double atrValue, int qty)
 			{
-				return s.ExitUnits == RutaMirrorExitUnits.Dollars ? DollarsToPoints(s.StopLossDollars, qty) : atrValue * s.SlAtrMult;
+				return s.ExitUnits != RutaMirrorExitUnits.AtrMultiple ? DollarsToPoints(s.StopLossDollars, qty) : atrValue * s.SlAtrMult;
 			}
 
 			private double TargetDistance(double atrValue, int qty)
 			{
-				return s.ExitUnits == RutaMirrorExitUnits.Dollars ? DollarsToPoints(s.TakeProfitDollars, qty) : atrValue * s.TpAtrMult;
+				return s.ExitUnits != RutaMirrorExitUnits.AtrMultiple ? DollarsToPoints(s.TakeProfitDollars, qty) : atrValue * s.TpAtrMult;
 			}
 
 			// $ for the whole position -> points, rounded to the tick. 1 NQ ($20/pt): $500 = 25 points.
@@ -973,24 +984,62 @@ namespace NinjaTrader.NinjaScript.Strategies
 
 			public string ExitRuleText()
 			{
-				string levels = s.ExitUnits == RutaMirrorExitUnits.Dollars
-					? string.Format(CultureInfo.InvariantCulture, "SL ${0} / TP ${1} per position", s.StopLossDollars, s.TakeProfitDollars)
-					: string.Format(CultureInfo.InvariantCulture, "SL {0} ATR / TP {1} ATR", s.SlAtrMult, s.TpAtrMult);
+				string levels;
+				if (s.ExitUnits == RutaMirrorExitUnits.Dollars)
+					levels = string.Format(CultureInfo.InvariantCulture, "SL ${0} / TP ${1} per position, {2} contract(s)", s.StopLossDollars, s.TakeProfitDollars, Math.Max(1, s.FixedContracts));
+				else if (s.ExitUnits == RutaMirrorExitUnits.DollarsSizedByAtr)
+					levels = string.Format(CultureInfo.InvariantCulture, "SL ${0} / TP ${1} per position, contracts sized for a ~{2} ATR stop", s.StopLossDollars, s.TakeProfitDollars, s.SlAtrMult);
+				else
+					levels = string.Format(CultureInfo.InvariantCulture, "SL {0} ATR / TP {1} ATR", s.SlAtrMult, s.TpAtrMult);
 				return levels + (s.ExitExecution == RutaMirrorExitExecution.StopTargetOrders ? ", stop/target orders inside the bar" : ", checked on the close");
 			}
 
 			// Replaces the martingale/leverage sizing. RiskPerTrade is the non-martingale "USD" mode of the
 			// Pine script: its qty = initial_size / (sl_multiplier * atr), i.e. it loses initial_size at the stop.
+			//
+			// DollarsSizedByAtr: contracts = floor(Stop Loss $ / (SL ATR multiplier x ATR x point value)), then the stop and
+			// target are placed so the position loses exactly Stop Loss $ / wins exactly Take Profit $. Quiet market: tight
+			// stop, more contracts; fast market: wide stop, fewer contracts.
 			private int ComputeQty(double atrValue)
 			{
-				int maxQty = Math.Max(1, s.MaxContracts);
-				if (s.Sizing == RutaMirrorSizing.FixedContracts || s.ExitUnits == RutaMirrorExitUnits.Dollars)
+				int limit;
+				return ComputeQty(atrValue, out limit);
+			}
+
+			// limit: +1 capped at Max Contracts, -1 raised to the 1-contract minimum, 0 neither
+			private int ComputeQty(double atrValue, out int limit)
+			{
+				limit = 0;
+				if (s.ExitUnits == RutaMirrorExitUnits.Dollars)
+					return Math.Max(1, s.FixedContracts);
+				double budget;
+				if (s.ExitUnits == RutaMirrorExitUnits.DollarsSizedByAtr)
+					budget = s.StopLossDollars;
+				else if (s.Sizing == RutaMirrorSizing.RiskPerTrade)
+					budget = s.RiskPerTrade;
+				else
 					return Math.Max(1, s.FixedContracts);
 				double riskPerContract = atrValue * s.SlAtrMult * s.PointValue;
 				if (double.IsNaN(riskPerContract) || riskPerContract <= 0)
 					return 1;
-				int qty = (int)Math.Floor(s.RiskPerTrade / riskPerContract);
-				return Math.Min(maxQty, Math.Max(1, qty));
+				int maxQty = Math.Max(1, s.MaxContracts);
+				double qty = Math.Floor(budget / riskPerContract);	// compared as double: no int overflow on a tiny ATR
+				if (qty > maxQty) { limit = 1; return maxQty; }
+				if (qty < 1) { limit = -1; return 1; }
+				return (int)qty;
+			}
+
+			private bool SizesFromAtr
+			{
+				get { return s.ExitUnits == RutaMirrorExitUnits.DollarsSizedByAtr || (s.ExitUnits == RutaMirrorExitUnits.AtrMultiple && s.Sizing == RutaMirrorSizing.RiskPerTrade); }
+			}
+
+			private string SizeStatsText()
+			{
+				if (!SizesFromAtr || sizedEntries == 0)
+					return null;
+				return string.Format(CultureInfo.InvariantCulture, "Contracts per entry: min {0}, max {1}, avg {2:0.0}   capped at Max Contracts {3}x, raised to 1 contract {4}x",
+					minEntryQty, maxEntryQty, (double)sumEntryQty / sizedEntries, entriesCapped, entriesRaised);
 			}
 
 			private double SelectSource(double o, double h, double l, double c, double v, double volMaValue)
@@ -1033,6 +1082,9 @@ namespace NinjaTrader.NinjaScript.Strategies
 					&& s.UseHeikinAshiFilter && s.UseVolumeFilter && s.UseTrendFilter;
 				sb.AppendLine(tvMode ? "RutaCryptoMirror - TradingView mirror (fills at bar close)" : "RutaCryptoMirror - CUSTOM settings (not the TradingView logic)");
 				sb.AppendLine("Exits: " + ExitRuleText());
+				string sizeStats = SizeStatsText();
+				if (sizeStats != null)
+					sb.AppendLine(sizeStats);
 				sb.AppendLine(string.Format(CultureInfo.InvariantCulture, "Bars processed: {0}   (trades allowed from bar {1})", barsSeen, barsRequired));
 				sb.AppendLine(string.Format(CultureInfo.InvariantCulture, "Closed trades: {0}   Win rate: {1:0.0}%", n, n > 0 ? 100.0 * wins / n : 0.0));
 				sb.AppendLine(string.Format(CultureInfo.InvariantCulture, "Net: {0:+0.00;-0.00} pts x contracts   ${1:0.00}   Profit factor: {2}", grossProfitPts - grossLossPts, netMoney,
@@ -1246,17 +1298,17 @@ namespace NinjaTrader.NinjaScript.Strategies
 		public double TakeProfitAtrMultiplier { get; set; }
 
 		[NinjaScriptProperty]
-		[Display(Name = "Stop/Target Units", Description = "AtrMultiple = TradingView (the two ATR multipliers above). Dollars = the $ amounts below for the whole position (uses Fixed Contracts).", Order = 6, GroupName = "1. Strategy Conditions (Pine)")]
+		[Display(Name = "Stop/Target Units", Description = "AtrMultiple = TradingView (the two ATR multipliers above). Dollars = fixed $ with Fixed Contracts. DollarsSizedByAtr = fixed $, contracts sized so the stop is ~SL ATR multiplier x ATR.", Order = 6, GroupName = "1. Strategy Conditions (Pine)")]
 		public RutaMirrorExitUnits ExitUnits { get; set; }
 
 		[NinjaScriptProperty]
 		[Range(1.0, double.MaxValue)]
-		[Display(Name = "Stop Loss ($)", Description = "Dollars mode: loss per position at the stop. 1 NQ: $500 = 25 points; 1 MNQ: $500 = 250 points.", Order = 7, GroupName = "1. Strategy Conditions (Pine)")]
+		[Display(Name = "Stop Loss ($)", Description = "Dollars modes: loss per position at the stop. 1 NQ: $500 = 25 points; 1 MNQ: $500 = 250 points.", Order = 7, GroupName = "1. Strategy Conditions (Pine)")]
 		public double StopLossDollars { get; set; }
 
 		[NinjaScriptProperty]
 		[Range(1.0, double.MaxValue)]
-		[Display(Name = "Take Profit ($)", Description = "Dollars mode: profit per position at the target.", Order = 8, GroupName = "1. Strategy Conditions (Pine)")]
+		[Display(Name = "Take Profit ($)", Description = "Dollars modes: profit per position at the target.", Order = 8, GroupName = "1. Strategy Conditions (Pine)")]
 		public double TakeProfitDollars { get; set; }
 
 		[NinjaScriptProperty]
@@ -1333,7 +1385,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 
 		[NinjaScriptProperty]
 		[Range(1, int.MaxValue)]
-		[Display(Name = "Max Contracts", Order = 4, GroupName = "5. Position Size")]
+		[Display(Name = "Max Contracts", Description = "Safety cap for ATR sizing. In DollarsSizedByAtr a capped (or 1-contract) entry keeps the $ amounts, so its stop is wider (or tighter) than the ATR target.", Order = 4, GroupName = "5. Position Size")]
 		public int MaxContracts { get; set; }
 
 		[NinjaScriptProperty]
@@ -1397,7 +1449,8 @@ public enum RutaMirrorSizing
 public enum RutaMirrorExitUnits
 {
 	AtrMultiple,
-	Dollars
+	Dollars,
+	DollarsSizedByAtr
 }
 
 public enum RutaMirrorExitExecution
