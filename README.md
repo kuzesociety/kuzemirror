@@ -140,19 +140,40 @@ SETUP REPORT (hindsight): every possible entry at the bar close, exited by the s
 
 The report looks into the future. It is for analysis only; the strategy never uses it to trade.
 
-### Optimizing in NinjaTrader
+### Optimizing in NinjaTrader: the full plan
 
-1. Control Center → **New → Strategy Analyzer**. Choose RutaCryptoMirror, your instrument, 5 minutes, and the same trading hours as the chart.
-2. **Backtest type = Optimization.** Every parameter then gets Min / Max / Increment. Start with 2–3 parameters at a time, for example:
-   * RSI Lower Level 10 → 35 step 5, RSI Upper Level 60 → 85 step 5
-   * Volume Increase Threshold −60 → 20 step 10
-   * Stop Loss ATR 1 → 3 step 0.5, Take Profit ATR 2 → 6 step 1
-   * RSI Length 7 → 21 step 7, Volume MA Length 5 → 20 step 5
-   * the three filter switches (true / false)
-3. **Optimize on** *Max profit factor* or *Max Sharpe ratio*, not *Max net profit* (which favors a few lucky trades). In the results, ignore any combination with fewer than ~50 trades.
-4. For many parameters at once, set **Optimizer = Genetic**.
-5. Guard against curve fitting: optimize on older data (e.g. 3 months), then run the winner **once** on the next month it has never seen. Better still, use **Backtest type = Walk Forward** (e.g. 20 days optimize / 5 days test). A setting that only works in-sample is noise.
-6. Turn off the *Show …* chart options in the analyzer; it runs faster.
+**Fixed frame for every pass** (Control Center → New → Strategy Analyzer):
+* MNQ, 5 minutes, trading hours *CME US Index Futures ETH*. Tuning period: e.g. 6 months. Keep the 3 most recent months unseen.
+* Include commission ✓, Slippage 1, Exit on session close ✗, Bars required to trade 200.
+* Stop/Target Units = **DollarsSizedByAtr**, Exit Execution = **StopTargetOrders**, **Stop Loss $ = 1000** (fixed in every pass), Take Profit $ = 1500, Max Contracts = 40.
+* Enable Orders = True; every *Show / Print / Export* option = False.
+* Optimize on **Max profit factor**, Keep best # results = 50. For every parameter not being tested in a pass, set Min = Max.
+
+In *DollarsSizedByAtr* the Stop Loss $ only sets the contract count; the stop distance comes from ATR. So $500 and $2000 give the same trades at a different size, and profit factor can't tell them apart. **Don't optimize Stop Loss $.** Pick it last from your account size (0.5–1% risk per trade). What changes the trades is the **Stop Loss ATR Multiplier** (stop width) and **Take Profit $ ÷ Stop Loss $** (target width).
+
+| Pass | What | Parameters (Min → Max, step) | Runs |
+|---|---|---|---|
+| 0 | Baseline | nothing: Backtest type Standard. Write down PF, trades, max drawdown | 1 |
+| 1 | Trigger | RSI Lower Level 10 → 40, 5 · RSI Upper Level 60 → 90, 5 | 49 |
+| 2 | Filters | Use Heikin Ashi / Volume osc / SMA trend: True and False · Volume Increase Threshold −60 → 20, 10 | 72 |
+| 3 | Exits | Take Profit $ 500 → 3000, 500 (= 0.5× to 3× the stop) · Stop Loss ATR Multiplier 1 → 3, 0.5 | 30 |
+| 4 | Lengths | RSI Length 7 → 21, 7 · Volume MA Length 5 → 20, 5 | 12 |
+| 5 | Re-check the trigger | pass 1 again, with everything else set | 49 |
+| 6 | Unseen months | Standard backtest on the 3 held-back months | 1 |
+| 7 | Walk Forward | 60 days optimize / 20 days test. Only the 4 that mattered most, coarse steps, e.g. RSI Lower 15 → 35, 10 · RSI Upper 65 → 85, 10 · TP $ 1000 → 2000, 500 · SL ATR 1.5 → 2.5, 0.5 | 81 per window |
+| 8 | Size | choose Stop Loss $ from your account; scale Take Profit $ by the same factor | – |
+
+After each pass, carry the chosen values into the next pass. Rules for choosing:
+* Ignore rows with fewer than **100 trades**. Pick from an area where the **neighboring values are also good**, never a lone best row.
+* **Only change a setting if it clearly helps**: profit factor up by about 0.1 or more, with a similar trade count. Otherwise keep the original value. Every change you keep is another way to fit the past.
+* Before pass 2, read the setup report on your chart. Filters whose "Blocked ONLY by" row shows positive avg R are the ones worth switching off.
+* Pass 5: if the best RSI levels jump somewhere else entirely, the result is unstable. Prefer the original levels.
+* Pass 6: profit factor should stay above ~1.2 at a similar trade frequency. If it collapses, go back and change fewer settings.
+* Pass 7 is the most honest estimate. If its combined test windows lose money, the strategy has no stable edge on this instrument.
+
+**Don't optimize:** Stop Loss $ (a size decision), Max Contracts (a safety cap), ATR Length / Trend SMA Length (hard-coded in Pine; only try them last, if at all), Round Heikin Ashi to tick, or the chart options.
+
+**Tip:** Genetic optimizer (**Optimizer = Genetic**) only if a pass goes above ~2,000 runs. The staged plan above is easier to understand and to trust.
 
 Important:
 * The TradingView values (71 / 20 / −39) look like they were optimized on NAS100 CFD tick volume ("Optimized" is in the script's name). There is no reason they are best for NQ volume, so re-optimizing on your own instrument is reasonable. **After you change them, the strategy no longer mirrors TradingView.** Save the defaults first: in the strategy's properties, *Template → Save*, e.g. "TV mirror".
@@ -181,7 +202,7 @@ With ATR exits, size never changes *when* or *at what price* it trades.
 | 1 MNQ ($2/pt) | 250 pts | 500 pts | 750 pts | 1000 pts |
 | 2 NQ | 12.5 pts | 25 pts | 37.5 pts | 50 pts |
 
-So with a fixed number of contracts, optimizing the dollars *is* optimizing the stop/target distance. The difference from ATR: a fixed distance ignores volatility. 25 points is wide in the overnight session and narrow at the 9:30 open. The optimizer can tell you which works better on your data.
+So with a fixed number of contracts (*Dollars* mode), optimizing the dollars *is* optimizing the stop/target distance. (In *DollarsSizedByAtr* it isn't: there the dollars only set the size. See the plan in section 7.) The difference from ATR: a fixed distance ignores volatility. 25 points is wide in the overnight session and narrow at the 9:30 open. The optimizer can tell you which works better on your data.
 
 ### Fixed $ stop and target, contracts sized by ATR (recommended for fixed $)
 
