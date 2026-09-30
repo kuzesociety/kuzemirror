@@ -102,6 +102,11 @@ namespace NinjaTrader.NinjaScript.Strategies
 				TrendSmaLength = 10;
 				RoundHeikinAshiToTick = false;
 
+				// Filter switches: all ON = TradingView. Turn off only to test / optimize.
+				UseHeikinAshiFilter = true;
+				UseVolumeFilter = true;
+				UseTrendFilter = true;
+
 				// Position size (replaces martingale)
 				SizingMode = RutaMirrorSizing.FixedContracts;
 				FixedContracts = 1;
@@ -113,6 +118,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 				ShowSignals = true;
 				ShowTvFills = true;
 				ShowTradeLines = true;
+				ShowSkippedSetups = true;
 				ShowStats = true;
 				PrintTradeList = false;
 				ExportTradesCsv = false;
@@ -138,6 +144,9 @@ namespace NinjaTrader.NinjaScript.Strategies
 				s.AtrLength = AtrLength;
 				s.TrendSmaLength = TrendSmaLength;
 				s.RoundHaToTick = RoundHeikinAshiToTick;
+				s.UseHeikinAshiFilter = UseHeikinAshiFilter;
+				s.UseVolumeFilter = UseVolumeFilter;
+				s.UseTrendFilter = UseTrendFilter;
 				s.TickSize = TickSize;
 				s.PointValue = Instrument.MasterInstrument.PointValue;
 				s.Sizing = SizingMode;
@@ -152,7 +161,6 @@ namespace NinjaTrader.NinjaScript.Strategies
 				signalFont = new SimpleFont("Arial", 10);
 				statsFont = new SimpleFont("Arial", 12);
 				barsCsv = null;
-				Print(Name + " started on " + Instrument.FullName + " " + BarsPeriod.Value + " " + BarsPeriod.BarsPeriodType + " - status box at the bottom-left of the chart when loading finishes.");
 				if (ExportBarsCsv)
 				{
 					barsCsv = new StringBuilder();
@@ -165,6 +173,9 @@ namespace NinjaTrader.NinjaScript.Strategies
 				{
 					Print(Name + " " + Instrument.FullName + " historical TV-mirror result: " + engine.SummaryLine());
 					Print(Name + " " + engine.DiagnosticText(BarsRequiredToTrade).Replace("\n", " | "));
+					Print(Name + " " + engine.SkippedSummary());
+					foreach (string line in engine.SetupReport())
+						Print(line);
 				}
 				WriteCsvFiles();
 			}
@@ -269,6 +280,17 @@ namespace NinjaTrader.NinjaScript.Strategies
 					t.Points > 0 ? Brushes.LimeGreen : Brushes.OrangeRed, DashStyleHelper.Dot, 2);
 			}
 
+			if (ShowSkippedSetups)
+			{
+				if (r.NewSkipped != null)
+					foreach (TvEngine.Setup x in r.NewSkipped)
+						DrawSkipped(x, Brushes.Gray, "");
+				if (r.ResolvedCandidates != null)
+					foreach (TvEngine.Setup x in r.ResolvedCandidates)
+						if (!x.Taken)
+							DrawSkipped(x, x.Outcome > 0 ? Brushes.LimeGreen : Brushes.OrangeRed, x.Outcome > 0 ? " (won)" : " (lost)");
+			}
+
 			if (r.ClosedTrade != null && PrintTradeList)
 				Print(FormatTradeLine(r.ClosedTrade));
 
@@ -277,6 +299,15 @@ namespace NinjaTrader.NinjaScript.Strategies
 			bool lastHistoricalBar = State == State.Historical && CurrentBar >= Bars.Count - 2;
 			if (ShowStats && (State != State.Historical || lastHistoricalBar || r.EntryDirection != 0 || r.ExitComment != null))
 				Draw.TextFixed(this, TagPrefix + "stats", engine.StatsText(BarsRequiredToTrade), TextPosition.BottomLeft, Brushes.White, statsFont, Brushes.Gray, Brushes.Black, 70);
+		}
+
+		// A setup where the RSI trigger fired but no trade was taken, with the filters that blocked it.
+		// Gray while undecided, then green / red once hindsight shows it would have hit TP / SL.
+		private void DrawSkipped(TvEngine.Setup x, Brush brush, string result)
+		{
+			string text = (x.Direction > 0 ? "skip buy: " : "skip sell: ") + x.Blockers + result;
+			Draw.Text(this, TagPrefix + "skip" + (x.Direction > 0 ? "L" : "S") + x.Bar, false, text, x.Time, x.LabelY, x.Direction > 0 ? -18 : 18,
+				brush, signalFont, TextAlignment.Center, Brushes.Transparent, Brushes.Transparent, 0);
 		}
 
 		// TradingView style order marker: sells above the bar ("-qty" over the name), buys below
@@ -342,6 +373,22 @@ namespace NinjaTrader.NinjaScript.Strategies
 			return sb.ToString();
 		}
 
+		// Every bar where the RSI trigger fired, taken or not, with its filters and hindsight outcome
+		private string BuildSetupsCsv()
+		{
+			StringBuilder sb = new StringBuilder();
+			sb.AppendLine("nt_bar_time,tv_bar_time,side,rsi,ha_ok,vol_ok,sma_ok,pos_ok,taken,blocked_by,outcome,resolved_nt_time,r_multiple");
+			foreach (TvEngine.Setup x in engine.Candidates)
+			{
+				sb.AppendLine(string.Format(CultureInfo.InvariantCulture, "{0:yyyy-MM-dd HH:mm},{1:yyyy-MM-dd HH:mm},{2},{3:0.00},{4},{5},{6},{7},{8},{9},{10},{11},{12}",
+					x.Time, ToTvBarTime(x.Time), x.Direction > 0 ? "long" : "short", x.Rsi, x.HaOk ? 1 : 0, x.VolOk ? 1 : 0, x.SmaOk ? 1 : 0, x.PosOk ? 1 : 0,
+					x.Taken ? 1 : 0, x.Blockers, x.Outcome > 0 ? "win" : x.Outcome < 0 ? "loss" : "open",
+					x.ResolvedBar >= 0 ? x.ResolvedTime.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture) : "",
+					x.ResolvedBar >= 0 ? x.R.ToString("0.00", CultureInfo.InvariantCulture) : ""));
+			}
+			return sb.ToString();
+		}
+
 		private void WriteCsvFiles()
 		{
 			if (engine == null || (!ExportTradesCsv && barsCsv == null))
@@ -352,7 +399,10 @@ namespace NinjaTrader.NinjaScript.Strategies
 				System.IO.Directory.CreateDirectory(dir);
 				string baseName = SafeFileName(Instrument.FullName + "_" + BarsPeriod.Value + BarsPeriod.BarsPeriodType);
 				if (ExportTradesCsv)
+				{
 					System.IO.File.WriteAllText(System.IO.Path.Combine(dir, baseName + "_trades.csv"), BuildTradesCsv());
+					System.IO.File.WriteAllText(System.IO.Path.Combine(dir, baseName + "_setups.csv"), BuildSetupsCsv());
+				}
 				if (barsCsv != null)
 					System.IO.File.WriteAllText(System.IO.Path.Combine(dir, baseName + "_bars.csv"), barsCsv.ToString());
 				Print(Name + ": CSV written to " + dir);
@@ -387,6 +437,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 				public RutaMirrorMaType VolumeMaType = RutaMirrorMaType.SMA;
 				public int AtrLength = 14, TrendSmaLength = 10;
 				public bool RoundHaToTick;
+				public bool UseHeikinAshiFilter = true, UseVolumeFilter = true, UseTrendFilter = true;
 				public double TickSize = 0.25, PointValue = 1;
 				public RutaMirrorSizing Sizing = RutaMirrorSizing.FixedContracts;
 				public int FixedContracts = 1, MaxContracts = 10;
@@ -415,6 +466,30 @@ namespace NinjaTrader.NinjaScript.Strategies
 				public string ExitComment;			// "Take Profit" / "Stop Loss" when strategy.close_all filled
 				public double FillPrice = double.NaN;	// TradingView fill price (= close) when an order filled
 				public TvTrade ClosedTrade;			// trade closed on this bar (exit or reversal)
+				public List<Setup> NewSkipped;		// RSI-trigger setups on this bar that were NOT traded
+				public List<Setup> ResolvedCandidates;	// RSI-trigger setups whose hindsight outcome was decided on this bar
+			}
+
+			/// <summary>
+			/// A possible entry at a bar's close, followed in hindsight with the strategy's own exit rule
+			/// (SL / TP on the close). Used ONLY for the setup report and the chart markers, never to trade.
+			/// </summary>
+			public sealed class Setup
+			{
+				public int Bar, Direction, ResolvedBar = -1;
+				public int Outcome;					// +1 take profit first, -1 stop loss first, 0 still open
+				public DateTime Time, ResolvedTime;
+				public double Entry, Stop, Target, Risk, LabelY, Rsi;
+				public double R;					// result in R (1R = the stop distance)
+				public bool Trigger, HaOk, VolOk, SmaOk, PosOk, Taken;
+				public string Blockers;				// e.g. "HA SMA", "in position", "" when taken
+				public int Groups;					// report buckets this setup belongs to (bit mask)
+			}
+
+			public sealed class Bucket
+			{
+				public int N, Wins, Losses;
+				public double SumR;
 			}
 
 			private readonly Settings s;
@@ -489,8 +564,14 @@ namespace NinjaTrader.NinjaScript.Strategies
 				minVolume = Math.Min(minVolume, volume);
 				maxVolume = Math.Max(maxVolume, volume);
 
-				bool longCond = hclose > hopen && crossUp && osc > s.VolumeThreshold && close > trend;
-				bool shortCond = hclose < hopen && crossDown && osc > s.VolumeThreshold && close < trend;
+				// longcond / shortcond. Every filter switch is ON by default = TradingView; they exist for testing/optimizing.
+				bool haLong = !s.UseHeikinAshiFilter || hclose > hopen;
+				bool haShort = !s.UseHeikinAshiFilter || hclose < hopen;
+				bool volOk = !s.UseVolumeFilter || osc > s.VolumeThreshold;
+				bool smaLong = !s.UseTrendFilter || close > trend;
+				bool smaShort = !s.UseTrendFilter || close < trend;
+				bool longCond = haLong && crossUp && volOk && smaLong;
+				bool shortCond = haShort && crossDown && volOk && smaShort;
 
 				r.HaOpen = hopen;
 				r.HaClose = hclose;
@@ -579,8 +660,178 @@ namespace NinjaTrader.NinjaScript.Strategies
 
 				r.PositionAfter = position;
 				r.QtyAfter = positionQty;
+
+				// Setup report (hindsight, never used to trade): settle older setups on this close, then open this bar's
+				ResolveSetups(barIndex, time, close, r);
+				if (canTrade && atrValue > 0)
+				{
+					AddSetup(r, barIndex, time, close, atrValue, rsi1, 1, crossUp, haLong, volOk, smaLong, pos <= 0, entryDir == 1, low);
+					AddSetup(r, barIndex, time, close, atrValue, rsi1, -1, crossDown, haShort, volOk, smaShort, pos >= 0, entryDir == -1, high);
+				}
 				return r;
 			}
+
+			#region Setup report
+			private static readonly string[] BucketNames =
+			{
+				"Every bar, no filters (baseline)",
+				"RSI cross (trigger only)",
+				"RSI cross + Heikin Ashi",
+				"RSI cross + HA + Volume osc",
+				"All filters pass = signals",
+				"Blocked ONLY by Heikin Ashi",
+				"Blocked ONLY by Volume osc",
+				"Blocked ONLY by SMA trend",
+				"Signal skipped: already in position"
+			};
+			private readonly Bucket[,] buckets = CreateBuckets();
+			private readonly List<Setup> pending = new List<Setup>();
+			private readonly List<Setup> candidates = new List<Setup>();
+
+			public List<Setup> Candidates { get { return candidates; } }
+
+			private static Bucket[,] CreateBuckets()
+			{
+				Bucket[,] b = new Bucket[BucketNames.Length, 2];
+				for (int i = 0; i < BucketNames.Length; i++)
+				{
+					b[i, 0] = new Bucket();
+					b[i, 1] = new Bucket();
+				}
+				return b;
+			}
+
+			private void AddSetup(BarResult r, int barIndex, DateTime time, double close, double atrValue, double rsiValue, int dir,
+				bool trigger, bool haOk, bool volOk, bool smaOk, bool posOk, bool taken, double labelY)
+			{
+				Setup x = new Setup();
+				x.Bar = barIndex;
+				x.Time = time;
+				x.Direction = dir;
+				x.Entry = close;
+				x.Risk = atrValue * s.SlAtrMult;
+				x.Stop = close - dir * atrValue * s.SlAtrMult;		// same arithmetic as the entry blocks
+				x.Target = close + dir * atrValue * s.TpAtrMult;
+				x.LabelY = labelY;
+				x.Rsi = rsiValue;
+				x.Trigger = trigger;
+				x.HaOk = haOk;
+				x.VolOk = volOk;
+				x.SmaOk = smaOk;
+				x.PosOk = posOk;
+				x.Taken = taken;
+
+				int groups = 1;
+				if (trigger)
+				{
+					groups |= 2;
+					if (haOk) groups |= 4;
+					if (haOk && volOk) groups |= 8;
+					if (haOk && volOk && smaOk) groups |= 16;
+					int fails = (haOk ? 0 : 1) + (volOk ? 0 : 1) + (smaOk ? 0 : 1);
+					if (fails == 1)
+						groups |= !haOk ? 32 : !volOk ? 64 : 128;
+					if (fails == 0 && !posOk)
+						groups |= 256;
+
+					List<string> why = new List<string>();
+					if (!haOk) why.Add("HA");
+					if (!volOk) why.Add("VOL");
+					if (!smaOk) why.Add("SMA");
+					if (why.Count == 0 && !posOk) why.Add("in position");
+					x.Blockers = string.Join(" ", why.ToArray());
+
+					candidates.Add(x);
+					if (!taken)
+					{
+						if (r.NewSkipped == null)
+							r.NewSkipped = new List<Setup>();
+						r.NewSkipped.Add(x);
+					}
+				}
+				x.Groups = groups;
+				pending.Add(x);
+			}
+
+			private void ResolveSetups(int barIndex, DateTime time, double close, BarResult r)
+			{
+				for (int i = 0; i < pending.Count; i++)
+				{
+					Setup x = pending[i];
+					bool targetHit = x.Direction > 0 ? close >= x.Target : close <= x.Target;
+					bool stopHit = x.Direction > 0 ? close <= x.Stop : close >= x.Stop;
+					if (!targetHit && !stopHit)
+						continue;
+					x.Outcome = stopHit ? -1 : 1;		// same "last call wins" as the real exit block
+					x.ResolvedBar = barIndex;
+					x.ResolvedTime = time;
+					x.R = (close - x.Entry) * x.Direction / x.Risk;
+					int side = x.Direction > 0 ? 0 : 1;
+					for (int b = 0; b < BucketNames.Length; b++)
+					{
+						if ((x.Groups & (1 << b)) == 0)
+							continue;
+						Bucket k = buckets[b, side];
+						k.N++;
+						if (x.Outcome > 0) k.Wins++; else k.Losses++;
+						k.SumR += x.R;
+					}
+					if (x.Trigger)
+					{
+						if (r.ResolvedCandidates == null)
+							r.ResolvedCandidates = new List<Setup>();
+						r.ResolvedCandidates.Add(x);
+					}
+					pending.RemoveAt(i);
+					i--;
+				}
+			}
+
+			public string SkippedSummary()
+			{
+				int n = 0, won = 0, lost = 0;
+				foreach (Setup x in candidates)
+				{
+					if (x.Taken)
+						continue;
+					n++;
+					if (x.Outcome > 0) won++;
+					else if (x.Outcome < 0) lost++;
+				}
+				return string.Format(CultureInfo.InvariantCulture, "Skipped RSI setups: {0}  (in hindsight: would have won {1}, lost {2}, still open {3})", n, won, lost, n - won - lost);
+			}
+
+			public List<string> SetupReport()
+			{
+				List<string> lines = new List<string>();
+				double breakEven = 100.0 * s.SlAtrMult / (s.SlAtrMult + s.TpAtrMult);
+				lines.Add(string.Format(CultureInfo.InvariantCulture,
+					"SETUP REPORT (hindsight): every possible entry at the bar close, exited by the strategy's own rule (SL {0} ATR / TP {1} ATR on the close). Break-even win rate ~{2:0.0}%. avg R > 0 = that group makes money.",
+					s.SlAtrMult, s.TpAtrMult, breakEven));
+				for (int b = 0; b < BucketNames.Length; b++)
+					lines.Add(string.Format(CultureInfo.InvariantCulture, "  {0,-38} | LONG  {1} | SHORT  {2}",
+						BucketNames[b], FormatBucket(buckets[b, 0]), FormatBucket(buckets[b, 1])));
+				return lines;
+			}
+
+			private static string FormatBucket(Bucket k)
+			{
+				if (k.N == 0)
+					return "n=0".PadRight(34);
+				return string.Format(CultureInfo.InvariantCulture, "n={0,5}  win {1,5:0.0}%  avg R {2,6:+0.00;-0.00}", k.N, 100.0 * k.Wins / k.N, k.SumR / k.N);
+			}
+
+			// Machine-readable buckets (used by the automated checks)
+			public List<string> BucketRows()
+			{
+				List<string> rows = new List<string>();
+				for (int b = 0; b < BucketNames.Length; b++)
+					for (int side = 0; side < 2; side++)
+						rows.Add(string.Format(CultureInfo.InvariantCulture, "{0},{1},{2},{3},{4},{5:R}", b, side == 0 ? "long" : "short",
+							buckets[b, side].N, buckets[b, side].Wins, buckets[b, side].Losses, buckets[b, side].SumR));
+				return rows;
+			}
+			#endregion
 
 			private TvTrade CloseTrade(int barIndex, DateTime time, double price, string exitSignal)
 			{
@@ -670,6 +921,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 				else
 					sb.AppendLine(string.Format(CultureInfo.InvariantCulture, "Position: {0} {1} @ {2}   SL {3:0.00}   TP {4:0.00}",
 						position > 0 ? "Long" : "Short", positionQty, positionPrice, stopLossLevel, profitTarget));
+				sb.AppendLine(SkippedSummary());
 				sb.Append(DiagnosticText(barsRequired));
 				return sb.ToString();
 			}
@@ -915,6 +1167,18 @@ namespace NinjaTrader.NinjaScript.Strategies
 		public bool RoundHeikinAshiToTick { get; set; }
 
 		[NinjaScriptProperty]
+		[Display(Name = "Use Heikin Ashi filter", Description = "ON = TradingView. Turn off only to test / optimize.", Order = 1, GroupName = "8. Filter switches (all ON = TradingView)")]
+		public bool UseHeikinAshiFilter { get; set; }
+
+		[NinjaScriptProperty]
+		[Display(Name = "Use Volume osc filter", Description = "ON = TradingView. Turn off only to test / optimize.", Order = 2, GroupName = "8. Filter switches (all ON = TradingView)")]
+		public bool UseVolumeFilter { get; set; }
+
+		[NinjaScriptProperty]
+		[Display(Name = "Use SMA trend filter", Description = "ON = TradingView. Turn off only to test / optimize.", Order = 3, GroupName = "8. Filter switches (all ON = TradingView)")]
+		public bool UseTrendFilter { get; set; }
+
+		[NinjaScriptProperty]
 		[Display(Name = "Sizing Mode", Description = "FixedContracts, or RiskPerTrade (= the Pine 'USD' sizing without martingale)", Order = 1, GroupName = "5. Position Size")]
 		public RutaMirrorSizing SizingMode { get; set; }
 
@@ -946,16 +1210,19 @@ namespace NinjaTrader.NinjaScript.Strategies
 		[Display(Name = "Show Trade Lines", Order = 3, GroupName = "7. Chart / Compare")]
 		public bool ShowTradeLines { get; set; }
 
-		[Display(Name = "Show Stats Box", Order = 4, GroupName = "7. Chart / Compare")]
+		[Display(Name = "Show Skipped Setups", Description = "RSI trigger fired but no trade: shows the blocking filter, turns green/red with the hindsight result", Order = 4, GroupName = "7. Chart / Compare")]
+		public bool ShowSkippedSetups { get; set; }
+
+		[Display(Name = "Show Stats Box", Order = 5, GroupName = "7. Chart / Compare")]
 		public bool ShowStats { get; set; }
 
-		[Display(Name = "Print Trades To Output", Order = 5, GroupName = "7. Chart / Compare")]
+		[Display(Name = "Print Trades To Output", Order = 6, GroupName = "7. Chart / Compare")]
 		public bool PrintTradeList { get; set; }
 
-		[Display(Name = "Export Trades CSV", Description = "Documents\\NinjaTrader 8\\RutaCryptoMirror\\<instrument>_trades.csv", Order = 6, GroupName = "7. Chart / Compare")]
+		[Display(Name = "Export Trades CSV", Description = "Documents\\NinjaTrader 8\\RutaCryptoMirror\\<instrument>_trades.csv (+ _setups.csv)", Order = 7, GroupName = "7. Chart / Compare")]
 		public bool ExportTradesCsv { get; set; }
 
-		[Display(Name = "Export Bar Values CSV", Description = "Per-bar HA / RSI / osc / ATR values to compare with the debug Pine script", Order = 7, GroupName = "7. Chart / Compare")]
+		[Display(Name = "Export Bar Values CSV", Description = "Per-bar HA / RSI / osc / ATR values to compare with the debug Pine script", Order = 8, GroupName = "7. Chart / Compare")]
 		public bool ExportBarsCsv { get; set; }
 		#endregion
 	}

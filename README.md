@@ -20,7 +20,7 @@ The martingale and leverage parts are removed. Nothing in the entry or exit logi
 **Nothing on the chart?**
 * No status box at the bottom-left: the strategy is not running. Check the **Enabled** box. Then look at **Control Center → Log** for a red line mentioning RutaCryptoMirror.
 * Status box but no trades: its last line says why: `NOT ENOUGH DATA` (load more days), `NO VOLUME` (this instrument's data has no real volume), the RSI never crossed its levels, or the other filters rejected every cross.
-* **New → NinjaScript Output** shows a `started on …` line and the same diagnosis when loading finishes.
+* **New → NinjaScript Output** shows the same diagnosis, plus the setup report (section 7), when loading finishes.
 
 Chart setup for a fair comparison:
 
@@ -96,25 +96,87 @@ Turn **Enable Orders** off to use it as a pure "TradingView trades" indicator.
 
 If `rsi_source` (the Volume MA) differs, the volume data differs (section 3). If it matches but `rsi` differs early in the chart, load more days: RSI and ATR are recursive and need warm-up.
 
-## 7. Differences that cannot be removed
+## 7. Why a good move wasn't traded, and how to optimize
+
+A move gets missed in one of two ways. The chart and the Output window tell you which.
+
+**a) The trigger never fired.** Every trade starts with the RSI of the Volume MA crossing up through 20 (long) or down through 71 (short). If a move has **no marker at all**, that cross didn't happen there. No filter setting changes that. Only RSI Lower/Upper Level, RSI Length, Volume MA Length or the RSI source do.
+
+**b) The trigger fired but something blocked it.** Those bars get a small label (**Show Skipped Setups**):
+
+| Label | Blocked by |
+|---|---|
+| `skip buy: HA` / `skip sell: HA` | Heikin Ashi candle had the wrong color |
+| `… VOL` | Volume oscillator at or below the *Volume Increase Threshold* |
+| `… SMA` | Close on the wrong side of the 10-bar SMA |
+| `… in position` | Already in a trade in that direction; the Pine script doesn't add to positions |
+
+Labels start **gray**. Once price reaches the stop or the target on a close, they turn **green "(won)"** or **red "(lost)"**. That is a hindsight check of the same trade with the same SL/TP rule.
+
+### The setup report (NinjaScript Output, printed when the chart finishes loading)
+
+```
+SETUP REPORT (hindsight): every possible entry at the bar close, exited by the strategy's own rule ...
+  Every bar, no filters (baseline)       | LONG  n= 5772  win  40.5%  avg R  +0.20 | SHORT ...
+  RSI cross (trigger only)               | LONG  n=   52  win  48.1%  avg R  +0.46 | SHORT ...
+  RSI cross + Heikin Ashi                | ...
+  RSI cross + HA + Volume osc            | ...
+  All filters pass = signals             | ...
+  Blocked ONLY by Heikin Ashi            | ...
+  Blocked ONLY by Volume osc             | ...
+  Blocked ONLY by SMA trend              | ...
+  Signal skipped: already in position    | ...
+```
+*(example numbers from test data, not from your market)*
+
+*R* is the result in units of the stop distance: a target hit is about +2R with the default 2/4 ATR, a stop is about −1R. **avg R above 0 means that group of entries makes money**; below 0 means it loses. How to read it:
+
+* **Baseline vs "RSI cross"**: if entering on the RSI cross is not clearly better than entering on any bar, the trigger has no edge on this instrument's volume data.
+* **Each "+ filter" row** should raise avg R. If adding a filter doesn't raise it, that filter only removes trades.
+* **"Blocked ONLY by X"** lists setups where X was the *only* filter that failed. If that row has positive avg R and a decent n, filter X is throwing away winners. Try turning it off (group *8. Filter switches*) or loosening its level.
+* Rows with **n below ~30** are noise. Load more days before drawing conclusions.
+* With **Export Trades CSV** on, `<instrument>_setups.csv` lists every trigger bar: its filters, whether it was taken, and its outcome. You can filter it in Excel.
+
+The report looks into the future. It is for analysis only; the strategy never uses it to trade.
+
+### Optimizing in NinjaTrader
+
+1. Control Center → **New → Strategy Analyzer**. Choose RutaCryptoMirror, your instrument, 5 minutes, and the same trading hours as the chart.
+2. **Backtest type = Optimization.** Every parameter then gets Min / Max / Increment. Start with 2–3 parameters at a time, for example:
+   * RSI Lower Level 10 → 35 step 5, RSI Upper Level 60 → 85 step 5
+   * Volume Increase Threshold −60 → 20 step 10
+   * Stop Loss ATR 1 → 3 step 0.5, Take Profit ATR 2 → 6 step 1
+   * RSI Length 7 → 21 step 7, Volume MA Length 5 → 20 step 5
+   * the three filter switches (true / false)
+3. **Optimize on** *Max profit factor* or *Max Sharpe ratio*, not *Max net profit* (which favors a few lucky trades). In the results, ignore any combination with fewer than ~50 trades.
+4. For many parameters at once, set **Optimizer = Genetic**.
+5. Guard against curve fitting: optimize on older data (e.g. 3 months), then run the winner **once** on the next month it has never seen. Better still, use **Backtest type = Walk Forward** (e.g. 20 days optimize / 5 days test). A setting that only works in-sample is noise.
+6. Turn off the *Show …* chart options in the analyzer; it runs faster.
+
+Important:
+* The TradingView values (71 / 20 / −39) look like they were optimized on NAS100 CFD tick volume ("Optimized" is in the script's name). There is no reason they are best for NQ volume, so re-optimizing on your own instrument is reasonable. **After you change them, the strategy no longer mirrors TradingView.** Save the defaults first: in the strategy's properties, *Template → Save*, e.g. "TV mirror".
+* If "good trades" means trades **TradingView took and NinjaTrader didn't**, optimizing won't fix it. That is the data difference in section 3. Compare the `rsi_source` column (section 6) around those bars.
+
+## 8. Differences that cannot be removed
 
 * **Fill price.** No real broker can fill at the close of a bar that has already closed. NinjaTrader's real fills come one tick later; TradingView's simulated fill is the close. The drawn markers and the stats box use TradingView's price; NinjaTrader's Strategy Performance uses the real fills.
 * **Start of history.** A position TradingView opened before NinjaTrader's first loaded bar does not exist in NinjaTrader. Both line up from the next signal.
 * **Heikin Ashi ties.** If a trade differs only on a bar where HA open and close are within half a tick, toggle **Round Heikin Ashi to tick**. I could not confirm whether TradingView rounds HA values.
 
-## 8. Position size (replaces the martingale)
+## 9. Position size (replaces the martingale)
 
 * `FixedContracts` (default): always *Fixed Contracts*.
 * `RiskPerTrade`: `floor(Risk Per Trade $ / (SL ATR multiplier × ATR × point value))`, capped at *Max Contracts*. This is the Pine script's non-martingale "USD" sizing: its `qty = initial_size / (sl_multiplier × atr)` loses `initial_size` at the stop.
 
 Size never changes *when* or *at what price* it trades.
 
-## 9. How the port was verified
+## 10. How the port was verified
 
 `tools/verify/run.sh` (needs the .NET 8 SDK and Python 3):
 
 * compiles the shipped `RutaCryptoMirror.cs` as **C# 5**, NinjaTrader 8's language level, against stand-ins for the NinjaTrader API;
 * runs it on 6 synthetic 5-minute datasets and checks that every TradingView fill produces exactly one NinjaTrader order on the same bar, and that `Calculate = OnEachTick` gives the same trades as `OnBarClose`;
 * recomputes everything with an independent Python version of the Pine script. Result: **0 mismatches over 36,000 bars and 295 trades**, on every indicator value, both conditions, the position, and every entry and exit time, price and reason.
+* recomputes the setup report the same way: all 848 RSI-trigger setups (filters, blocker, outcome, R) and every report row match. A run with the SMA filter switched off matches too. Every real TP/SL trade has the same hindsight outcome as its setup.
 
 This proves the C# follows the Pine script exactly. It does not replace the real side-by-side check in section 3: neither TradingView nor NinjaTrader can run in this environment, so the compile was against stand-ins, not NinjaTrader itself.

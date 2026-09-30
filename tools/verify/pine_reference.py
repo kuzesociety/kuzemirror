@@ -98,7 +98,7 @@ def crossunder(a, level, i):
     return i > 0 and lt(a[i], level) and not na(a[i - 1]) and a[i - 1] >= level
 
 
-def run(bars):
+def run(bars, use_ha=True, use_vol=True, use_sma=True):
     o = [b['open'] for b in bars]
     h = [b['high'] for b in bars]
     l = [b['low'] for b in bars]
@@ -119,14 +119,19 @@ def run(bars):
     a = atr(h, l, c, P['atrlen'])
     trend = sma(c, P['trendlen'])
 
-    longcond = [gt(hc[i], ho[i]) and crossover(r, P['rsilower'], i) and gt(osc[i], P['vollevel']) and gt(c[i], trend[i]) for i in range(n)]
-    shortcond = [lt(hc[i], ho[i]) and crossunder(r, P['rsiupper'], i) and gt(osc[i], P['vollevel']) and lt(c[i], trend[i]) for i in range(n)]
+    # filter results per side (a switched-off filter always passes)
+    ha_ok = {1: [not use_ha or gt(hc[i], ho[i]) for i in range(n)], -1: [not use_ha or lt(hc[i], ho[i]) for i in range(n)]}
+    vol_ok = [not use_vol or gt(osc[i], P['vollevel']) for i in range(n)]
+    sma_ok = {1: [not use_sma or gt(c[i], trend[i]) for i in range(n)], -1: [not use_sma or lt(c[i], trend[i]) for i in range(n)]}
+    trig = {1: [crossover(r, P['rsilower'], i) for i in range(n)], -1: [crossunder(r, P['rsiupper'], i) for i in range(n)]}
+    longcond = [ha_ok[1][i] and trig[1][i] and vol_ok[i] and sma_ok[1][i] for i in range(n)]
+    shortcond = [ha_ok[-1][i] and trig[-1][i] and vol_ok[i] and sma_ok[-1][i] for i in range(n)]
 
     # --- script execution + broker emulator (process_orders_on_close=true) ---
     position = 0          # signed contracts
     entry_bar = entry_px = None
     tp = sl = NA
-    trades, pos_before = [], []
+    trades, pos_before, entry_dir = [], [], [0] * n
     for i in range(n):
         lc = longcond[i] and i >= WARMUP
         sc = shortcond[i] and i >= WARMUP
@@ -156,6 +161,7 @@ def run(bars):
                 if position == 0:
                     position = side        # 1 contract
                     entry_bar, entry_px = i, c[i]
+                    entry_dir[i] = side
             else:
                 # a close order can only reduce the position it was placed against; if that position
                 # was reversed by an earlier order of this bar, it is cancelled
@@ -163,8 +169,51 @@ def run(bars):
                     trades.append((entry_bar, 'Long' if position > 0 else 'Short', entry_px, i, name, c[i]))
                     position = 0
 
+    # --- setup report: every bar/side followed forward with the SL/TP-on-close rule ---
+    buckets = {(b, sd): [0, 0, 0, 0.0] for b in range(9) for sd in ('long', 'short')}
+    setups = []
+    for i in range(WARMUP, n):
+        if na(a[i]) or not a[i] > 0:
+            continue
+        for d in (1, -1):
+            entry, risk = c[i], a[i] * P['sl']
+            stop, target = c[i] - d * a[i] * P['sl'], c[i] + d * a[i] * P['tp']
+            outcome, res_bar = 0, None
+            for j in range(i + 1, n):
+                hit_t = c[j] >= target if d > 0 else c[j] <= target
+                hit_s = c[j] <= stop if d > 0 else c[j] >= stop
+                if hit_t or hit_s:
+                    outcome, res_bar = (-1 if hit_s else 1), j
+                    break
+            h_ok, v_ok, s_ok = ha_ok[d][i], vol_ok[i], sma_ok[d][i]
+            p_ok = pos_before[i] <= 0 if d > 0 else pos_before[i] >= 0
+            groups = {0}
+            if trig[d][i]:
+                groups.add(1)
+                if h_ok: groups.add(2)
+                if h_ok and v_ok: groups.add(3)
+                if h_ok and v_ok and s_ok: groups.add(4)
+                failed = [name for name, ok in (('HA', h_ok), ('VOL', v_ok), ('SMA', s_ok)) if not ok]
+                if len(failed) == 1:
+                    groups.add({'HA': 5, 'VOL': 6, 'SMA': 7}[failed[0]])
+                if not failed and not p_ok:
+                    groups.add(8)
+                blockers = ' '.join(failed) if failed else ('' if p_ok else 'in position')
+                rr = (c[res_bar] - entry) * d / risk if res_bar is not None else None
+                setups.append((i, 'long' if d > 0 else 'short', int(h_ok), int(v_ok), int(s_ok), int(p_ok),
+                               int(entry_dir[i] == d), blockers, {1: 'win', -1: 'loss', 0: 'open'}[outcome], res_bar,
+                               None if rr is None else round(rr, 2)))
+            if res_bar is not None:
+                rr = (c[res_bar] - entry) * d / risk
+                for g in groups:
+                    k = buckets[(g, 'long' if d > 0 else 'short')]
+                    k[0] += 1
+                    k[1 if outcome > 0 else 2] += 1
+                    k[3] += rr
+
     return dict(ho=ho, hc=hc, src=src, rsi=r, osc=osc, atr=a, trend=trend,
-                longcond=longcond, shortcond=shortcond, pos=pos_before, trades=trades)
+                longcond=longcond, shortcond=shortcond, pos=pos_before, trades=trades,
+                setups=setups, buckets=buckets)
 
 
 def read_csv(path):
@@ -226,7 +275,39 @@ def main(d):
             if a != b:
                 print('first trade diff:\n  C#     ', a, '\n  Python ', b)
                 break
-    ok = bad == 0 and same
+    # setup report
+    bk = {}
+    for line in open(d + '/nt_buckets.csv'):
+        b, side, nn, w, l, sr = line.strip().split(',')
+        bk[(int(b), side)] = (int(nn), int(w), int(l), float(sr))
+    bucket_ok = all(bk[key][:3] == tuple(v[:3]) and abs(bk[key][3] - v[3]) <= 1e-9 * max(1.0, abs(v[3]))
+                    for key, v in ref['buckets'].items())
+    print('setup report buckets identical: %s (baseline long n=%d)' % (bucket_ok, ref['buckets'][(0, 'long')][0]))
+
+    nts = read_csv(d + '/nt_setups.csv')
+    nt_setups = [(r['nt_bar_time'], r['side'], int(r['ha_ok']), int(r['vol_ok']), int(r['sma_ok']), int(r['pos_ok']),
+                  int(r['taken']), r['blocked_by'], r['outcome'], r['resolved_nt_time'],
+                  None if r['r_multiple'] == '' else float(r['r_multiple'])) for r in nts]
+    ref_setups = [(times[i], sd, h_, v_, s_, p_, t_, bl, oc, '' if rb is None else times[rb], rr)
+                  for (i, sd, h_, v_, s_, p_, t_, bl, oc, rb, rr) in ref['setups']]
+    setups_ok = nt_setups == ref_setups
+    print('skipped/taken RSI setups: C# %d, Python %d, identical: %s' % (len(nt_setups), len(ref_setups), setups_ok))
+    if not setups_ok:
+        for x, y in zip(nt_setups, ref_setups):
+            if x != y:
+                print('first setup diff:\n  C#     ', x, '\n  Python ', y)
+                break
+
+    # filter switch: SMA trend filter off
+    ref2 = run(bars, use_sma=False)
+    ntt2 = read_csv(d + '/nt_trades_nosma.csv')
+    nt2 = [(ntt2[k]['NT bar time (close)'], ntt2[k]['Type'].split()[1], float(ntt2[k]['Price']),
+            ntt2[k + 1]['NT bar time (close)'], ntt2[k + 1]['Signal'], float(ntt2[k + 1]['Price'])) for k in range(0, len(ntt2), 2)]
+    rt2 = [(times[eb], side, ep, times[xb], sig, xp) for (eb, side, ep, xb, sig, xp) in ref2['trades']]
+    switch_ok = nt2 == rt2
+    print('SMA filter off: C# %d trades, Python %d, identical: %s' % (len(nt2), len(rt2), switch_ok))
+
+    ok = bad == 0 and same and bucket_ok and setups_ok and switch_ok
     print('ALL PYTHON CROSS-CHECKS PASSED' if ok else 'PYTHON CROSS-CHECK FAILED')
     return 0 if ok else 1
 

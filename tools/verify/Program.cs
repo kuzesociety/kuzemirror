@@ -136,6 +136,8 @@ public static class Program
 		string csvDir = Path.Combine(NinjaTrader.Core.Globals.UserDataDir, "RutaCryptoMirror");
 		File.Copy(Path.Combine(csvDir, "NQ_12-26_5Minute_bars.csv"), Path.Combine(outDir, "nt_bars.csv"), true);
 		File.Copy(Path.Combine(csvDir, "NQ_12-26_5Minute_trades.csv"), Path.Combine(outDir, "nt_trades.csv"), true);
+		File.Copy(Path.Combine(csvDir, "NQ_12-26_5Minute_setups.csv"), Path.Combine(outDir, "nt_setups.csv"), true);
+		File.WriteAllLines(Path.Combine(outDir, "nt_buckets.csv"), a.EngineForTest.BucketRows().ToArray());
 
 		RutaCryptoMirror.TvEngine eng = a.EngineForTest;
 		List<RutaCryptoMirror.TvEngine.TvTrade> trades = eng.Trades;
@@ -210,7 +212,7 @@ public static class Program
 
 		// ---- Status box: always visible after the historical load, and explains an empty chart ----
 		string lastBox = DrawingLog.Calls.Where(c => c.StartsWith("TextFixed ")).LastOrDefault() ?? "";
-		Check(a.Printed.Any(p => p.Contains("started on")), "prints a 'started' line when data is loaded");
+		Check(a.Printed.Any(p => p.StartsWith("SETUP REPORT")), "prints the setup report at the end of the historical load");
 		Check(a.Printed.Any(p => p.Contains("Since bar 200")), "prints the filter diagnostics at the end of the historical load");
 
 		Check(RunStatusOnly(bars.Take(150).ToList(), false).Contains("NOT ENOUGH DATA"), "status box says NOT ENOUGH DATA with 150 bars");
@@ -220,6 +222,41 @@ public static class Program
 		Check(RunStatusOnly(bars, false).Contains("Bars processed: " + n), "status box drawn on the last historical bar with no order on it");
 
 		Console.WriteLine("Status box: " + lastBox);
+
+		// ---- Setup report consistency: a taken trade that ended by TP/SL must have the same hindsight outcome ----
+		Dictionary<int, RutaCryptoMirror.TvEngine.Setup> takenByBar = new Dictionary<int, RutaCryptoMirror.TvEngine.Setup>();
+		foreach (RutaCryptoMirror.TvEngine.Setup x in eng.Candidates)
+			if (x.Taken)
+				takenByBar[x.Bar] = x;
+		bool consistent = trades.All(t => takenByBar.ContainsKey(t.EntryBar));
+		foreach (RutaCryptoMirror.TvEngine.TvTrade t in trades)
+		{
+			if (!consistent || (t.ExitSignal != "Take Profit" && t.ExitSignal != "Stop Loss"))
+				continue;
+			RutaCryptoMirror.TvEngine.Setup x = takenByBar[t.EntryBar];
+			consistent = x.ResolvedBar == t.ExitBar && (x.Outcome > 0) == (t.ExitSignal == "Take Profit") && x.Direction == t.Direction;
+		}
+		Check(consistent, "every real trade appears as a taken setup, and TP/SL trades match their hindsight outcome");
+		Check(eng.Candidates.Any(x => !x.Taken && x.Blockers == "SMA") && eng.Candidates.Any(x => !x.Taken && x.Blockers == "HA"), "skipped setups record the blocking filter");
+
+		// ---- Filter switch: SMA trend filter off (Python recomputes the same trades) ----
+		Harness noSma = NewHarness(true);
+		noSma.ExportBarsCsv = false;
+		noSma.UseTrendFilter = false;
+		noSma.Step(State.Configure);
+		noSma.Step(State.DataLoaded);
+		noSma.State = State.Historical;
+		noSma.Bars.Count = n;
+		for (int i = 0; i < n; i++)
+		{
+			Push(noSma, bars[i]);
+			noSma.CurrentBar = i;
+			noSma.IsFirstTickOfBar = true;
+			noSma.Bar();
+		}
+		noSma.Step(State.Terminated);
+		File.Copy(Path.Combine(csvDir, "NQ_12-26_5Minute_trades.csv"), Path.Combine(outDir, "nt_trades_nosma.csv"), true);
+		Check(noSma.EngineForTest.Trades.Count > trades.Count, "turning the SMA filter off gives more trades (" + noSma.EngineForTest.Trades.Count + " vs " + trades.Count + ")");
 
 		Console.WriteLine(failures == 0 ? "ALL C# CHECKS PASSED" : failures + " C# CHECK(S) FAILED");
 		return failures == 0 ? 0 : 1;

@@ -197,6 +197,10 @@ namespace NinjaTrader.NinjaScript.DrawingTools
 			Brush textBrush, SimpleFont font, TextAlignment alignment, Brush outlineBrush, Brush areaBrush, int areaOpacity)
 		{ DrawingLog.Calls.Add("Text " + tag + " " + text.Replace("\n", "|")); return null; }
 
+		public static Text Text(NinjaScriptBase owner, string tag, bool isAutoScale, string text, DateTime time, double y, int yPixelOffset,
+			Brush textBrush, SimpleFont font, TextAlignment alignment, Brush outlineBrush, Brush areaBrush, int areaOpacity)
+		{ DrawingLog.Calls.Add("TextAt " + tag + " " + text + " " + textBrush.Name); return null; }
+
 		public static TextFixed TextFixed(NinjaScriptBase owner, string tag, string text, TextPosition textPosition, Brush textBrush,
 			SimpleFont font, Brush outlineBrush, Brush areaBrush, int areaOpacity)
 		{ DrawingLog.Calls.Add("TextFixed " + tag + " " + text.Replace("\n", "|")); return null; }
