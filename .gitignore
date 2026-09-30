@@ -1,0 +1,3 @@
+tools/verify/bin/
+tools/verify/obj/
+__pycache__/

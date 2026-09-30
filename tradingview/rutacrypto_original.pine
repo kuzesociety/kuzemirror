@@ -1,0 +1,122 @@
+//@version=4
+strategy("rutacrypto Optimized with Martingale and Leverage", overlay=true, process_orders_on_close=true)
+
+// Heikin Ashi Calculations
+hclose = security(heikinashi(syminfo.tickerid), timeframe.period, close)
+hhigh = security(heikinashi(syminfo.tickerid), timeframe.period, high)
+hlow = security(heikinashi(syminfo.tickerid), timeframe.period, low)
+hopen = security(heikinashi(syminfo.tickerid), timeframe.period, open)
+
+// Inputs
+lookback1 = input(defval=7, minval=0, title="Lookback Candles", group="Strategy Conditions")
+rsiupper = input(defval=71, minval=1, maxval=1000, title="RSI Upper Level", group="Strategy Conditions")
+rsilower = input(defval=20, minval=1, maxval=1000, title="RSI Lower Level", group="Strategy Conditions")
+vollevel = input(defval=-39, minval=-1000, maxval=1000, title="Volume Increase Threshold", group="Strategy Conditions")
+sl_multiplier = input(defval=2, minval=0.1, step=0.1, title="Stop Loss ATR Multiplier", group="Strategy Conditions")
+tp_multiplier = input(defval=4, minval=0.1, step=0.1, title="Take Profit ATR Multiplier", group="Strategy Conditions")
+
+shortlen = input(5, minval=1, title="Short Length", group="Volume Oscillator")
+longlen = input(14, minval=1, title="Long Length", group="Volume Oscillator")
+
+rsisrc = input(defval=close, type=input.source, title="Source", group="RSI")
+rsilen = input(defval=12, minval=1, title="Length", group="RSI")
+
+// Martingale Settings
+enable_martingale = input(type=input.bool, defval=true, title="Enable Martingale", group="Martingale Settings")
+sizing_type = input(type=input.string, defval="USD", title="Position Sizing Type", options=["USD", "Percent of Equity"], group="Martingale Settings")
+initial_size = input(type=input.float, defval=1000, title="Initial Size", minval=0, step=10, group="Martingale Settings")
+martingale_multiplier = input(type=input.float, defval=2, title="Martingale Multiplier", minval=1, step=0.1, group="Martingale Settings")
+max_martingale_steps = input(type=input.integer, defval=3, title="Max Martingale Steps", minval=1, step=1, group="Martingale Settings")
+
+// Indicators
+short = ema(volume, shortlen)
+long = ema(volume, longlen)
+osc = 100 * (short - long) / long
+rsi1 = rsi(rsisrc, rsilen)
+atr = atr(14)
+trendma = sma(close, 10)
+
+// Entry Conditions
+longcond = (hclose > hopen) and crossover(rsi1, rsilower) and (osc > vollevel) and (close > trendma)
+shortcond = (hclose < hopen) and crossunder(rsi1, rsiupper) and (osc > vollevel) and (close < trendma)
+
+// Signal Visualization
+plotshape(longcond and strategy.position_size <= 0, title="Buy", text="Buy", textcolor=color.black, size=size.auto, style=shape.labelup, location=location.belowbar, color=color.green)
+plotshape(shortcond and strategy.position_size >= 0, title="Sell", text="Sell", textcolor=color.black, size=size.auto, style=shape.labeldown, location=location.abovebar, color=color.red)
+
+// Martingale Variables
+var float current_multiplier = 1
+var int martingale_step = 0
+var bool last_trade_win = true
+
+// Trade Management
+var float entryPrice = na
+var float profitTarget = na
+var float stopLossLevel = na
+var float qty = na
+
+// Calculate Maximum Leverage
+sl_distance = atr * sl_multiplier
+sl_percentage = (sl_distance / close) * 100
+max_leverage = sl_percentage > 0 ? 100 / sl_percentage : 1
+
+// Calculate Position Value with Leverage
+float position_value = na
+if enable_martingale
+    if sizing_type == "USD"
+        position_value := initial_size * max_leverage * current_multiplier
+    else
+        position_value := strategy.equity * (initial_size / 100) * max_leverage * current_multiplier
+else
+    if sizing_type == "USD"
+        position_value := initial_size * max_leverage
+    else
+        position_value := strategy.equity * (initial_size / 100) * max_leverage
+qty := position_value / close
+
+// Calculate Margin Required (Invested Amount Based on Leverage Logic)
+float margin_required = position_value / max_leverage
+
+// Long Entry
+if longcond and strategy.position_size <= 0
+    entryPrice := close
+    stopLossLevel := entryPrice - atr * sl_multiplier
+    profitTarget := entryPrice + atr * tp_multiplier
+    strategy.entry("Long", strategy.long, qty=qty)
+    if not na(max_leverage)
+        label.new(bar_index, high, text="Max Leverage: " + tostring(round(max_leverage)) + ":1", color=color.blue, textcolor=color.white, style=label.style_none)
+    label.new(bar_index, high + atr * 0.1, text="Invested: $" + tostring(round(margin_required, 2)), color=color.rgb(234, 241, 234), textcolor=color.white, style=label.style_label_down)
+
+// Short Entry
+if shortcond and strategy.position_size >= 0
+    entryPrice := close
+    stopLossLevel := entryPrice + atr * sl_multiplier
+    profitTarget := entryPrice - atr * tp_multiplier
+    strategy.entry("Short", strategy.short, qty=qty)
+    if not na(max_leverage)
+        label.new(bar_index, high, text="Max Leverage: " + tostring(round(max_leverage)) + ":1", color=color.blue, textcolor=color.white, style=label.style_none)
+    label.new(bar_index, high - atr * 0.1, text="Invested: $" + tostring(round(margin_required, 2)), color=color.rgb(245, 238, 238), textcolor=color.white, style=label.style_label_down)
+
+// Exit Conditions with Trade Outcome Tracking
+if (strategy.position_size > 0 and close >= profitTarget) or (strategy.position_size < 0 and close <= profitTarget)
+    last_trade_win := true
+    strategy.close_all(comment="Take Profit")
+
+if (strategy.position_size > 0 and close <= stopLossLevel) or (strategy.position_size < 0 and close >= stopLossLevel)
+    last_trade_win := false
+    strategy.close_all(comment="Stop Loss")
+
+// Update Martingale Logic After Trade Closure
+if strategy.position_size[1] != 0 and strategy.position_size == 0 and enable_martingale
+    if last_trade_win
+        current_multiplier := 1
+        martingale_step := 0
+    else if martingale_step < max_martingale_steps
+        current_multiplier := current_multiplier * martingale_multiplier
+        martingale_step := martingale_step + 1
+
+// Plot Stop Loss and Take Profit Levels
+plotSL = (strategy.position_size != 0 or (longcond and strategy.position_size <= 0) or (shortcond and strategy.position_size >= 0)) ? stopLossLevel : na
+plotTP = (strategy.position_size != 0 or (longcond and strategy.position_size <= 0) or (shortcond and strategy.position_size >= 0)) ? profitTarget : na
+plot(plotSL, color=color.red, style=plot.style_line, title="Stop Loss")
+plot(plotTP, color=color.green, style=plot.style_line, title="Take Profit")
