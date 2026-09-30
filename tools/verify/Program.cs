@@ -97,6 +97,32 @@ public static class Program
 		return last ?? "";
 	}
 
+	// Historical OnBarClose run with custom settings; copies the trade/setup CSVs + report rows with a suffix
+	private static Harness RunCustom(List<BarData> data, Action<Harness> configure, string outDir, string suffix)
+	{
+		Harness h = NewHarness(true);
+		h.ExportBarsCsv = false;
+		h.PrintTradeList = false;
+		configure(h);
+		h.Step(State.Configure);
+		h.Step(State.DataLoaded);
+		h.State = State.Historical;
+		h.Bars.Count = data.Count;
+		for (int i = 0; i < data.Count; i++)
+		{
+			Push(h, data[i]);
+			h.CurrentBar = i;
+			h.IsFirstTickOfBar = true;
+			h.Bar();
+		}
+		h.Step(State.Terminated);
+		string csvDir = Path.Combine(NinjaTrader.Core.Globals.UserDataDir, "RutaCryptoMirror");
+		File.Copy(Path.Combine(csvDir, "NQ_12-26_5Minute_trades.csv"), Path.Combine(outDir, "nt_trades_" + suffix + ".csv"), true);
+		File.Copy(Path.Combine(csvDir, "NQ_12-26_5Minute_setups.csv"), Path.Combine(outDir, "nt_setups_" + suffix + ".csv"), true);
+		File.WriteAllLines(Path.Combine(outDir, "nt_buckets_" + suffix + ".csv"), h.EngineForTest.BucketRows().ToArray());
+		return h;
+	}
+
 	private static int failures;
 	private static void Check(bool ok, string what)
 	{
@@ -257,6 +283,27 @@ public static class Program
 		noSma.Step(State.Terminated);
 		File.Copy(Path.Combine(csvDir, "NQ_12-26_5Minute_trades.csv"), Path.Combine(outDir, "nt_trades_nosma.csv"), true);
 		Check(noSma.EngineForTest.Trades.Count > trades.Count, "turning the SMA filter off gives more trades (" + noSma.EngineForTest.Trades.Count + " vs " + trades.Count + ")");
+
+		// ---- Dollar exits: $500 stop / $1000 target on 1 NQ ($20/pt) = 25 / 50 points ----
+		Harness usdClose = RunCustom(bars, h => { h.ExitUnits = RutaMirrorExitUnits.Dollars; h.StopLossDollars = 500; h.TakeProfitDollars = 1000; }, outDir, "usd_close");
+		Harness usdOrders = RunCustom(bars, h => { h.ExitUnits = RutaMirrorExitUnits.Dollars; h.StopLossDollars = 500; h.TakeProfitDollars = 1000;
+			h.ExitExecution = RutaMirrorExitExecution.StopTargetOrders; }, outDir, "usd_orders");
+		List<RutaCryptoMirror.TvEngine.TvTrade> uo = usdOrders.EngineForTest.Trades;
+		Check(uo.Count > 20, "stop/target-order mode trades (" + uo.Count + ")");
+		Check(uo.Where(t => t.ExitSignal == "Stop Loss").All(t => Math.Abs((t.EntryPrice - t.ExitPrice) * t.Direction - 25) < 1e-9 || (t.EntryPrice - t.ExitPrice) * t.Direction > 25),
+			"stop/target orders: a stop loses exactly $500 (25 pts), or more only on a gap");
+		Check(uo.Where(t => t.ExitSignal == "Take Profit").All(t => (t.ExitPrice - t.EntryPrice) * t.Direction >= 50 - 1e-9),
+			"stop/target orders: a target wins at least $1000 (50 pts)");
+		Check(uo.Any(t => t.ExitSignal == "Stop Loss" && Math.Abs((t.EntryPrice - t.ExitPrice) * t.Direction - 25) < 1e-9),
+			"stop/target orders: most stops fill exactly at the level");
+		Check(usdClose.EngineForTest.Trades.Where(t => t.ExitSignal == "Stop Loss").Any(t => (t.EntryPrice - t.ExitPrice) * t.Direction > 25),
+			"on-close mode can overshoot the $ stop (why StopTargetOrders exists)");
+		int entries = usdOrders.Orders.Count(o => o.Contains(" EnterLong ") || o.Contains(" EnterShort "));
+		int stops = usdOrders.Orders.Count(o => o.Contains(" SetStopLoss ") && o.Contains(" Price "));
+		int targets = usdOrders.Orders.Count(o => o.Contains(" SetProfitTarget ") && o.Contains(" Price "));
+		Check(entries > 0 && stops == entries && targets == entries, "stop/target orders: SetStopLoss + SetProfitTarget (Price) before every entry");
+		Check(!usdOrders.Orders.Any(o => o.Contains(" ExitLong ") || o.Contains(" ExitShort ")), "stop/target orders: no on-close exit orders are sent");
+		Check(!a.Orders.Any(o => o.Contains("SetStopLoss") || o.Contains("SetProfitTarget")), "TradingView mode never sends stop/target orders");
 
 		Console.WriteLine(failures == 0 ? "ALL C# CHECKS PASSED" : failures + " C# CHECK(S) FAILED");
 		return failures == 0 ? 0 : 1;

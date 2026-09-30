@@ -98,7 +98,28 @@ def crossunder(a, level, i):
     return i > 0 and lt(a[i], level) and not na(a[i - 1]) and a[i - 1] >= level
 
 
-def run(bars, use_ha=True, use_vol=True, use_sma=True):
+def usd_to_points(usd, qty, pv, tick):
+    pts = usd / (max(1, qty) * pv)
+    return max(tick, round(pts / tick) * tick)   # round() is round-half-even, like C# Math.Round
+
+
+def intrabar(d, stop, target, o, h, l):
+    """Working stop + target orders during one bar: (-1 stop | 1 target | 0, fill). Gap -> open; both touched -> stop."""
+    if d > 0:
+        if o <= stop: return -1, o
+        if o >= target: return 1, o
+        if l <= stop: return -1, stop
+        if h >= target: return 1, target
+    else:
+        if o >= stop: return -1, o
+        if o <= target: return 1, o
+        if h >= stop: return -1, stop
+        if l <= target: return 1, target
+    return 0, None
+
+
+def run(bars, use_ha=True, use_vol=True, use_sma=True, units='atr', execution='close',
+        sl_usd=1000.0, tp_usd=1000.0, qty=1, pv=20.0, tick=0.25):
     o = [b['open'] for b in bars]
     h = [b['high'] for b in bars]
     l = [b['low'] for b in bars]
@@ -127,27 +148,40 @@ def run(bars, use_ha=True, use_vol=True, use_sma=True):
     longcond = [ha_ok[1][i] and trig[1][i] and vol_ok[i] and sma_ok[1][i] for i in range(n)]
     shortcond = [ha_ok[-1][i] and trig[-1][i] and vol_ok[i] and sma_ok[-1][i] for i in range(n)]
 
+    def dist(i, which):
+        if units == 'usd':
+            return usd_to_points(sl_usd if which == 'sl' else tp_usd, qty, pv, tick)
+        return a[i] * P[which]
+
     # --- script execution + broker emulator (process_orders_on_close=true) ---
     position = 0          # signed contracts
     entry_bar = entry_px = None
     tp = sl = NA
     trades, pos_before, entry_dir = [], [], [0] * n
     for i in range(n):
+        if execution == 'orders' and position != 0:
+            res, fill = intrabar(position, sl, tp, o[i], h[i], l[i])
+            if res:
+                trades.append((entry_bar, 'Long' if position > 0 else 'Short', entry_px, i,
+                               'Stop Loss' if res < 0 else 'Take Profit', fill))
+                position = 0
         lc = longcond[i] and i >= WARMUP
         sc = shortcond[i] and i >= WARMUP
         ps = position                      # strategy.position_size seen by the script
         pos_before.append((ps > 0) - (ps < 0))
         orders = []                        # placed in script order
         if lc and ps <= 0:
-            sl, tp = c[i] - a[i] * P['sl'], c[i] + a[i] * P['tp']
+            sl, tp = c[i] - dist(i, 'sl'), c[i] + dist(i, 'tp')
             orders.append(('entry', 'Long', 1))
         if sc and ps >= 0:
-            sl, tp = c[i] + a[i] * P['sl'], c[i] - a[i] * P['tp']
+            sl, tp = c[i] + dist(i, 'sl'), c[i] - dist(i, 'tp')
             orders.append(('entry', 'Short', -1))
         close_comment = None
-        if (ps > 0 and c[i] >= tp) or (ps < 0 and c[i] <= tp):
+        if execution != 'close':
+            pass
+        elif (ps > 0 and c[i] >= tp) or (ps < 0 and c[i] <= tp):
             close_comment = 'Take Profit'
-        if (ps > 0 and c[i] <= sl) or (ps < 0 and c[i] >= sl):
+        if execution == 'close' and ((ps > 0 and c[i] <= sl) or (ps < 0 and c[i] >= sl)):
             close_comment = 'Stop Loss'    # same order id as the first close_all -> replaces its comment
         if close_comment:
             orders.append(('close_all', close_comment, -1 if ps > 0 else 1))  # side fixed at placement
@@ -176,14 +210,18 @@ def run(bars, use_ha=True, use_vol=True, use_sma=True):
         if na(a[i]) or not a[i] > 0:
             continue
         for d in (1, -1):
-            entry, risk = c[i], a[i] * P['sl']
-            stop, target = c[i] - d * a[i] * P['sl'], c[i] + d * a[i] * P['tp']
-            outcome, res_bar = 0, None
+            entry, risk = c[i], dist(i, 'sl')
+            stop, target = c[i] - d * dist(i, 'sl'), c[i] + d * dist(i, 'tp')
+            outcome, res_bar, fill = 0, None, None
             for j in range(i + 1, n):
-                hit_t = c[j] >= target if d > 0 else c[j] <= target
-                hit_s = c[j] <= stop if d > 0 else c[j] >= stop
-                if hit_t or hit_s:
-                    outcome, res_bar = (-1 if hit_s else 1), j
+                if execution == 'orders':
+                    res, f = intrabar(d, stop, target, o[j], h[j], l[j])
+                else:
+                    hit_t = c[j] >= target if d > 0 else c[j] <= target
+                    hit_s = c[j] <= stop if d > 0 else c[j] >= stop
+                    res, f = (-1 if hit_s else 1 if hit_t else 0), c[j]
+                if res:
+                    outcome, res_bar, fill = res, j, f
                     break
             h_ok, v_ok, s_ok = ha_ok[d][i], vol_ok[i], sma_ok[d][i]
             p_ok = pos_before[i] <= 0 if d > 0 else pos_before[i] >= 0
@@ -199,12 +237,12 @@ def run(bars, use_ha=True, use_vol=True, use_sma=True):
                 if not failed and not p_ok:
                     groups.add(8)
                 blockers = ' '.join(failed) if failed else ('' if p_ok else 'in position')
-                rr = (c[res_bar] - entry) * d / risk if res_bar is not None else None
+                rr = (fill - entry) * d / risk if res_bar is not None else None
                 setups.append((i, 'long' if d > 0 else 'short', int(h_ok), int(v_ok), int(s_ok), int(p_ok),
                                int(entry_dir[i] == d), blockers, {1: 'win', -1: 'loss', 0: 'open'}[outcome], res_bar,
                                None if rr is None else round(rr, 2)))
             if res_bar is not None:
-                rr = (c[res_bar] - entry) * d / risk
+                rr = (fill - entry) * d / risk
                 for g in groups:
                     k = buckets[(g, 'long' if d > 0 else 'short')]
                     k[0] += 1
@@ -219,6 +257,27 @@ def run(bars, use_ha=True, use_vol=True, use_sma=True):
 def read_csv(path):
     with open(path, newline='') as f:
         return list(csv.DictReader(f))
+
+
+def load_trades(path):
+    rows = read_csv(path)
+    return [(rows[k]['NT bar time (close)'], rows[k]['Type'].split()[1], float(rows[k]['Price']),
+             rows[k + 1]['NT bar time (close)'], rows[k + 1]['Signal'], float(rows[k + 1]['Price'])) for k in range(0, len(rows), 2)]
+
+
+def load_setups(path):
+    return [(r['nt_bar_time'], r['side'], int(r['ha_ok']), int(r['vol_ok']), int(r['sma_ok']), int(r['pos_ok']),
+             int(r['taken']), r['blocked_by'], r['outcome'], r['resolved_nt_time'],
+             None if r['r_multiple'] == '' else float(r['r_multiple'])) for r in read_csv(path)]
+
+
+def buckets_match(path, ref_buckets):
+    bk = {}
+    for line in open(path):
+        b, side, nn, w, l, sr = line.strip().split(',')
+        bk[(int(b), side)] = (int(nn), int(w), int(l), float(sr))
+    return all(bk[key][:3] == tuple(v[:3]) and abs(bk[key][3] - v[3]) <= 1e-9 * max(1.0, abs(v[3]))
+               for key, v in ref_buckets.items())
 
 
 def main(d):
@@ -307,7 +366,18 @@ def main(d):
     switch_ok = nt2 == rt2
     print('SMA filter off: C# %d trades, Python %d, identical: %s' % (len(nt2), len(rt2), switch_ok))
 
-    ok = bad == 0 and same and bucket_ok and setups_ok and switch_ok
+    modes_ok = True
+    for suffix, kw in (('usd_close', dict(units='usd', sl_usd=500.0, tp_usd=1000.0)),
+                       ('usd_orders', dict(units='usd', sl_usd=500.0, tp_usd=1000.0, execution='orders'))):
+        refm = run(bars, **kw)
+        t_ok = load_trades(d + '/nt_trades_%s.csv' % suffix) == [(times[eb], side, ep, times[xb], sig, xp) for (eb, side, ep, xb, sig, xp) in refm['trades']]
+        s_ok = load_setups(d + '/nt_setups_%s.csv' % suffix) == [(times[i], sd, h_, v_, s_, p_, t_, bl, oc, '' if rb is None else times[rb], rr)
+                                                                   for (i, sd, h_, v_, s_, p_, t_, bl, oc, rb, rr) in refm['setups']]
+        b_ok = buckets_match(d + '/nt_buckets_%s.csv' % suffix, refm['buckets'])
+        print('%s: %d trades; trades identical %s, setups identical %s, report identical %s' % (suffix, len(refm['trades']), t_ok, s_ok, b_ok))
+        modes_ok = modes_ok and t_ok and s_ok and b_ok
+
+    ok = bad == 0 and same and bucket_ok and setups_ok and switch_ok and modes_ok
     print('ALL PYTHON CROSS-CHECKS PASSED' if ok else 'PYTHON CROSS-CHECK FAILED')
     return 0 if ok else 1
 

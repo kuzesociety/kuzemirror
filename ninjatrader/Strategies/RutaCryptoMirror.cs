@@ -102,6 +102,12 @@ namespace NinjaTrader.NinjaScript.Strategies
 				TrendSmaLength = 10;
 				RoundHeikinAshiToTick = false;
 
+				// Exits: ATR + On bar close = TradingView
+				ExitUnits = RutaMirrorExitUnits.AtrMultiple;
+				StopLossDollars = 1000;
+				TakeProfitDollars = 1000;
+				ExitExecution = RutaMirrorExitExecution.OnBarClose;
+
 				// Filter switches: all ON = TradingView. Turn off only to test / optimize.
 				UseHeikinAshiFilter = true;
 				UseVolumeFilter = true;
@@ -147,6 +153,10 @@ namespace NinjaTrader.NinjaScript.Strategies
 				s.UseHeikinAshiFilter = UseHeikinAshiFilter;
 				s.UseVolumeFilter = UseVolumeFilter;
 				s.UseTrendFilter = UseTrendFilter;
+				s.ExitUnits = ExitUnits;
+				s.StopLossDollars = StopLossDollars;
+				s.TakeProfitDollars = TakeProfitDollars;
+				s.ExitExecution = ExitExecution;
 				s.TickSize = TickSize;
 				s.PointValue = Instrument.MasterInstrument.PointValue;
 				s.Sizing = SizingMode;
@@ -220,20 +230,30 @@ namespace NinjaTrader.NinjaScript.Strategies
 		}
 
 		#region Orders
-		// Real NinjaTrader orders. They are market orders sent at the bar close, so NinjaTrader fills
+		// Real NinjaTrader orders. Entries are market orders sent at the bar close, so NinjaTrader fills
 		// them at the next tick (historical: the next bar's open). TradingView's simulated fill is the
 		// close itself; that price is what the diamonds/labels and the stats box show.
 		private void SubmitMirrorOrders(TvEngine.BarResult r)
 		{
+			if (r.EntryDirection != 0 && ExitExecution == RutaMirrorExitExecution.StopTargetOrders)
+			{
+				// real stop + target (OCO) at the strategy's levels, attached when the entry fills
+				string signal = r.EntryDirection > 0 ? "Long" : "Short";
+				SetStopLoss(signal, CalculationMode.Price, r.EntryStop, false);
+				SetProfitTarget(signal, CalculationMode.Price, r.EntryTarget);
+			}
+
 			if (r.EntryDirection > 0)
 				EnterLong(r.QtyAfter, "Long");			// reverses a short automatically, like strategy.entry
 			else if (r.EntryDirection < 0)
 				EnterShort(r.QtyAfter, "Short");
-			else if (r.ExitComment != null)
+
+			// On-close exits (TradingView). Stop/target-order exits were already filled by NinjaTrader itself.
+			if (r.ExitComment != null && !r.ExitIntrabar)
 			{
-				if (r.PositionBefore > 0)
+				if (r.ExitDirection > 0)
 					ExitLong(r.ExitComment, "Long");
-				else if (r.PositionBefore < 0)
+				else if (r.ExitDirection < 0)
 					ExitShort(r.ExitComment, "Short");
 			}
 		}
@@ -261,16 +281,17 @@ namespace NinjaTrader.NinjaScript.Strategies
 
 			if (ShowTvFills)
 			{
+				bool entryIsBuy = r.EntryDirection > 0;
+				if (r.ExitComment != null)
+				{
+					bool exitIsBuy = r.ExitDirection < 0;	// closing a short is a buy
+					// with stop/target orders an exit and a new entry can share a bar: move the exit label further out
+					int extraOffset = r.EntryDirection != 0 && exitIsBuy == entryIsBuy ? 34 : 0;
+					DrawOrder("x" + bar, ago, exitIsBuy, r.ExitComment, r.ExitQty, Brushes.Magenta, r.ExitFillPrice, extraOffset);
+				}
 				if (r.EntryDirection != 0)
-				{
-					bool isBuy = r.EntryDirection > 0;
-					DrawOrder(bar, ago, isBuy, isBuy ? "Long" : "Short", r.EntryOrderQty, isBuy ? Brushes.DodgerBlue : Brushes.Red, r.FillPrice);
-				}
-				else if (r.ExitComment != null)
-				{
-					bool isBuy = r.PositionBefore < 0;	// closing a short is a buy
-					DrawOrder(bar, ago, isBuy, r.ExitComment, r.QtyBefore, Brushes.Magenta, r.FillPrice);
-				}
+					DrawOrder(bar.ToString(CultureInfo.InvariantCulture), ago, entryIsBuy, entryIsBuy ? "Long" : "Short", r.EntryOrderQty,
+						entryIsBuy ? Brushes.DodgerBlue : Brushes.Red, r.FillPrice, 0);
 			}
 
 			if (ShowTradeLines && r.ClosedTrade != null)
@@ -312,13 +333,13 @@ namespace NinjaTrader.NinjaScript.Strategies
 
 		// TradingView style order marker: sells above the bar ("-qty" over the name), buys below
 		// ("name" over "+qty"), and a diamond at the exact TradingView fill price (the bar close).
-		private void DrawOrder(int bar, int ago, bool isBuy, string name, int qty, Brush brush, double fillPrice)
+		private void DrawOrder(string key, int ago, bool isBuy, string name, int qty, Brush brush, double fillPrice, int extraOffset)
 		{
-			Draw.Diamond(this, TagPrefix + "px" + bar, false, ago, fillPrice, brush);
+			Draw.Diamond(this, TagPrefix + "px" + key, false, ago, fillPrice, brush);
 			if (isBuy)
-				Draw.Text(this, TagPrefix + "ord" + bar, false, name + "\n+" + qty, ago, Low[ago], -46, brush, orderFont, TextAlignment.Center, Brushes.Transparent, Brushes.Transparent, 0);
+				Draw.Text(this, TagPrefix + "ord" + key, false, name + "\n+" + qty, ago, Low[ago], -46 - extraOffset, brush, orderFont, TextAlignment.Center, Brushes.Transparent, Brushes.Transparent, 0);
 			else
-				Draw.Text(this, TagPrefix + "ord" + bar, false, "-" + qty + "\n" + name, ago, High[ago], 46, brush, orderFont, TextAlignment.Center, Brushes.Transparent, Brushes.Transparent, 0);
+				Draw.Text(this, TagPrefix + "ord" + key, false, "-" + qty + "\n" + name, ago, High[ago], 46 + extraOffset, brush, orderFont, TextAlignment.Center, Brushes.Transparent, Brushes.Transparent, 0);
 		}
 		#endregion
 
@@ -438,6 +459,9 @@ namespace NinjaTrader.NinjaScript.Strategies
 				public int AtrLength = 14, TrendSmaLength = 10;
 				public bool RoundHaToTick;
 				public bool UseHeikinAshiFilter = true, UseVolumeFilter = true, UseTrendFilter = true;
+				public RutaMirrorExitUnits ExitUnits = RutaMirrorExitUnits.AtrMultiple;
+				public RutaMirrorExitExecution ExitExecution = RutaMirrorExitExecution.OnBarClose;
+				public double StopLossDollars = 1000, TakeProfitDollars = 1000;
 				public double TickSize = 0.25, PointValue = 1;
 				public RutaMirrorSizing Sizing = RutaMirrorSizing.FixedContracts;
 				public int FixedContracts = 1, MaxContracts = 10;
@@ -463,8 +487,12 @@ namespace NinjaTrader.NinjaScript.Strategies
 				public int QtyBefore, QtyAfter;
 				public int EntryDirection;			// +1 / -1 when strategy.entry filled on this bar
 				public int EntryOrderQty;			// TradingView order size (includes the reversed position)
-				public string ExitComment;			// "Take Profit" / "Stop Loss" when strategy.close_all filled
-				public double FillPrice = double.NaN;	// TradingView fill price (= close) when an order filled
+				public double EntryStop = double.NaN, EntryTarget = double.NaN;	// levels of the position opened on this bar
+				public double FillPrice = double.NaN;	// entry fill price (= close)
+				public string ExitComment;			// "Take Profit" / "Stop Loss" when the position was closed by an exit
+				public int ExitDirection, ExitQty;	// the position that exit closed
+				public double ExitFillPrice = double.NaN;
+				public bool ExitIntrabar;			// closed by a stop/target order inside the bar (ExitExecution = StopTargetOrders)
 				public TvTrade ClosedTrade;			// trade closed on this bar (exit or reversal)
 				public List<Setup> NewSkipped;		// RSI-trigger setups on this bar that were NOT traded
 				public List<Setup> ResolvedCandidates;	// RSI-trigger setups whose hindsight outcome was decided on this bar
@@ -589,6 +617,26 @@ namespace NinjaTrader.NinjaScript.Strategies
 					shortCond = false;
 				}
 
+				// ExitExecution = StopTargetOrders: the working stop and target orders can fill inside this bar,
+				// before the close where the signals are evaluated. (TradingView mode checks the close instead, below.)
+				bool intrabarExits = s.ExitExecution == RutaMirrorExitExecution.StopTargetOrders;
+				if (intrabarExits && position != 0)
+				{
+					double fill;
+					int hit = IntrabarExit(position, stopLossLevel, profitTarget, open, high, low, out fill);
+					if (hit != 0)
+					{
+						r.ExitComment = hit < 0 ? "Stop Loss" : "Take Profit";
+						r.ExitDirection = position;
+						r.ExitQty = positionQty;
+						r.ExitFillPrice = fill;
+						r.ExitIntrabar = true;
+						r.ClosedTrade = CloseTrade(barIndex, time, fill, r.ExitComment);
+						position = 0;
+						positionQty = 0;
+					}
+				}
+
 				// strategy.position_size as the script sees it (fills of earlier bars only)
 				int pos = position;
 				r.PositionBefore = pos;
@@ -606,16 +654,19 @@ namespace NinjaTrader.NinjaScript.Strategies
 
 				// Long Entry / Short Entry blocks: overwrite the levels first...
 				int entryDir = 0;
+				int newQty = ComputeQty(atrValue);
+				double slDist = StopDistance(atrValue, newQty);		// ATR mode: atr * sl_multiplier, exactly as Pine
+				double tpDist = TargetDistance(atrValue, newQty);
 				if (longCond && pos <= 0)
 				{
-					stopLossLevel = close - atrValue * s.SlAtrMult;
-					profitTarget = close + atrValue * s.TpAtrMult;
+					stopLossLevel = close - slDist;
+					profitTarget = close + tpDist;
 					entryDir = 1;
 				}
 				if (shortCond && pos >= 0)
 				{
-					stopLossLevel = close + atrValue * s.SlAtrMult;
-					profitTarget = close - atrValue * s.TpAtrMult;
+					stopLossLevel = close + slDist;
+					profitTarget = close - tpDist;
 					entryDir = -1;
 				}
 
@@ -636,7 +687,6 @@ namespace NinjaTrader.NinjaScript.Strategies
 					// strategy.entry reverses an opposite position in ONE order (old qty + new qty).
 					// The script's close_all calls on this bar are always true on a reversal bar (the levels
 					// were just overwritten) and TradingView drops them - the position ends up reversed.
-					int newQty = ComputeQty(atrValue);
 					r.EntryOrderQty = newQty + (pos != 0 ? positionQty : 0);
 					if (pos != 0)
 						r.ClosedTrade = CloseTrade(barIndex, time, close, entryDir > 0 ? "Long" : "Short");
@@ -646,23 +696,27 @@ namespace NinjaTrader.NinjaScript.Strategies
 					positionBar = barIndex;
 					positionTime = time;
 					r.EntryDirection = entryDir;
+					r.EntryStop = stopLossLevel;
+					r.EntryTarget = profitTarget;
 					r.FillPrice = close;
 				}
-				else if (pos != 0 && (takeProfitHit || stopLossHit))
+				else if (!intrabarExits && pos != 0 && (takeProfitHit || stopLossHit))
 				{
 					// strategy.close_all(comment="Take Profit") then strategy.close_all(comment="Stop Loss"): last call wins
 					r.ExitComment = stopLossHit ? "Stop Loss" : "Take Profit";
+					r.ExitDirection = pos;
+					r.ExitQty = positionQty;
+					r.ExitFillPrice = close;
 					r.ClosedTrade = CloseTrade(barIndex, time, close, r.ExitComment);
 					position = 0;
 					positionQty = 0;
-					r.FillPrice = close;
 				}
 
 				r.PositionAfter = position;
 				r.QtyAfter = positionQty;
 
 				// Setup report (hindsight, never used to trade): settle older setups on this close, then open this bar's
-				ResolveSetups(barIndex, time, close, r);
+				ResolveSetups(barIndex, time, open, high, low, close, r);
 				if (canTrade && atrValue > 0)
 				{
 					AddSetup(r, barIndex, time, close, atrValue, rsi1, 1, crossUp, haLong, volOk, smaLong, pos <= 0, entryDir == 1, low);
@@ -709,9 +763,12 @@ namespace NinjaTrader.NinjaScript.Strategies
 				x.Time = time;
 				x.Direction = dir;
 				x.Entry = close;
-				x.Risk = atrValue * s.SlAtrMult;
-				x.Stop = close - dir * atrValue * s.SlAtrMult;		// same arithmetic as the entry blocks
-				x.Target = close + dir * atrValue * s.TpAtrMult;
+				int qty = ComputeQty(atrValue);
+				double slDist = StopDistance(atrValue, qty);
+				double tpDist = TargetDistance(atrValue, qty);
+				x.Risk = slDist;
+				x.Stop = close - dir * slDist;		// same levels as the entry blocks
+				x.Target = close + dir * tpDist;
 				x.LabelY = labelY;
 				x.Rsi = rsiValue;
 				x.Trigger = trigger;
@@ -753,19 +810,28 @@ namespace NinjaTrader.NinjaScript.Strategies
 				pending.Add(x);
 			}
 
-			private void ResolveSetups(int barIndex, DateTime time, double close, BarResult r)
+			private void ResolveSetups(int barIndex, DateTime time, double open, double high, double low, double close, BarResult r)
 			{
+				bool intrabarExits = s.ExitExecution == RutaMirrorExitExecution.StopTargetOrders;
 				for (int i = 0; i < pending.Count; i++)
 				{
 					Setup x = pending[i];
-					bool targetHit = x.Direction > 0 ? close >= x.Target : close <= x.Target;
-					bool stopHit = x.Direction > 0 ? close <= x.Stop : close >= x.Stop;
-					if (!targetHit && !stopHit)
+					double fill = close;
+					int outcome;
+					if (intrabarExits)
+						outcome = IntrabarExit(x.Direction, x.Stop, x.Target, open, high, low, out fill);
+					else
+					{
+						bool targetHit = x.Direction > 0 ? close >= x.Target : close <= x.Target;
+						bool stopHit = x.Direction > 0 ? close <= x.Stop : close >= x.Stop;
+						outcome = stopHit ? -1 : targetHit ? 1 : 0;		// same "last call wins" as the real exit block
+					}
+					if (outcome == 0)
 						continue;
-					x.Outcome = stopHit ? -1 : 1;		// same "last call wins" as the real exit block
+					x.Outcome = outcome;
 					x.ResolvedBar = barIndex;
 					x.ResolvedTime = time;
-					x.R = (close - x.Entry) * x.Direction / x.Risk;
+					x.R = (fill - x.Entry) * x.Direction / x.Risk;
 					int side = x.Direction > 0 ? 0 : 1;
 					for (int b = 0; b < BucketNames.Length; b++)
 					{
@@ -804,10 +870,11 @@ namespace NinjaTrader.NinjaScript.Strategies
 			public List<string> SetupReport()
 			{
 				List<string> lines = new List<string>();
-				double breakEven = 100.0 * s.SlAtrMult / (s.SlAtrMult + s.TpAtrMult);
+				double sl = s.ExitUnits == RutaMirrorExitUnits.Dollars ? s.StopLossDollars : s.SlAtrMult;
+				double tp = s.ExitUnits == RutaMirrorExitUnits.Dollars ? s.TakeProfitDollars : s.TpAtrMult;
 				lines.Add(string.Format(CultureInfo.InvariantCulture,
-					"SETUP REPORT (hindsight): every possible entry at the bar close, exited by the strategy's own rule (SL {0} ATR / TP {1} ATR on the close). Break-even win rate ~{2:0.0}%. avg R > 0 = that group makes money.",
-					s.SlAtrMult, s.TpAtrMult, breakEven));
+					"SETUP REPORT (hindsight): every possible entry at the bar close, exited by the strategy's own rule ({0}). Break-even win rate ~{1:0.0}%. avg R > 0 = that group makes money.",
+					ExitRuleText(), 100.0 * sl / (sl + tp)));
 				for (int b = 0; b < BucketNames.Length; b++)
 					lines.Add(string.Format(CultureInfo.InvariantCulture, "  {0,-38} | LONG  {1} | SHORT  {2}",
 						BucketNames[b], FormatBucket(buckets[b, 0]), FormatBucket(buckets[b, 1])));
@@ -861,12 +928,63 @@ namespace NinjaTrader.NinjaScript.Strategies
 				return t;
 			}
 
+			// Stop / target distance in points for a new position of 'qty' contracts
+			private double StopDistance(double atrValue, int qty)
+			{
+				return s.ExitUnits == RutaMirrorExitUnits.Dollars ? DollarsToPoints(s.StopLossDollars, qty) : atrValue * s.SlAtrMult;
+			}
+
+			private double TargetDistance(double atrValue, int qty)
+			{
+				return s.ExitUnits == RutaMirrorExitUnits.Dollars ? DollarsToPoints(s.TakeProfitDollars, qty) : atrValue * s.TpAtrMult;
+			}
+
+			// $ for the whole position -> points, rounded to the tick. 1 NQ ($20/pt): $500 = 25 points.
+			private double DollarsToPoints(double dollars, int qty)
+			{
+				double points = dollars / (Math.Max(1, qty) * s.PointValue);
+				if (s.TickSize > 0)
+					points = Math.Max(s.TickSize, Math.Round(points / s.TickSize) * s.TickSize);
+				return points;
+			}
+
+			// Stop and target orders working during a bar. A gap through a level fills at the open. When one bar
+			// touches both levels its OHLC can't tell which came first, so the stop is assumed (conservative).
+			// Returns -1 stop, +1 target, 0 neither.
+			private static int IntrabarExit(int dir, double stop, double target, double open, double high, double low, out double fill)
+			{
+				fill = double.NaN;
+				if (dir > 0)
+				{
+					if (open <= stop) { fill = open; return -1; }
+					if (open >= target) { fill = open; return 1; }
+					if (low <= stop) { fill = stop; return -1; }
+					if (high >= target) { fill = target; return 1; }
+				}
+				else if (dir < 0)
+				{
+					if (open >= stop) { fill = open; return -1; }
+					if (open <= target) { fill = open; return 1; }
+					if (high >= stop) { fill = stop; return -1; }
+					if (low <= target) { fill = target; return 1; }
+				}
+				return 0;
+			}
+
+			public string ExitRuleText()
+			{
+				string levels = s.ExitUnits == RutaMirrorExitUnits.Dollars
+					? string.Format(CultureInfo.InvariantCulture, "SL ${0} / TP ${1} per position", s.StopLossDollars, s.TakeProfitDollars)
+					: string.Format(CultureInfo.InvariantCulture, "SL {0} ATR / TP {1} ATR", s.SlAtrMult, s.TpAtrMult);
+				return levels + (s.ExitExecution == RutaMirrorExitExecution.StopTargetOrders ? ", stop/target orders inside the bar" : ", checked on the close");
+			}
+
 			// Replaces the martingale/leverage sizing. RiskPerTrade is the non-martingale "USD" mode of the
 			// Pine script: its qty = initial_size / (sl_multiplier * atr), i.e. it loses initial_size at the stop.
 			private int ComputeQty(double atrValue)
 			{
 				int maxQty = Math.Max(1, s.MaxContracts);
-				if (s.Sizing == RutaMirrorSizing.FixedContracts)
+				if (s.Sizing == RutaMirrorSizing.FixedContracts || s.ExitUnits == RutaMirrorExitUnits.Dollars)
 					return Math.Max(1, s.FixedContracts);
 				double riskPerContract = atrValue * s.SlAtrMult * s.PointValue;
 				if (double.IsNaN(riskPerContract) || riskPerContract <= 0)
@@ -911,7 +1029,10 @@ namespace NinjaTrader.NinjaScript.Strategies
 			{
 				int n = trades.Count;
 				StringBuilder sb = new StringBuilder();
-				sb.AppendLine("RutaCryptoMirror - TradingView mirror (fills at bar close)");
+				bool tvMode = s.ExitUnits == RutaMirrorExitUnits.AtrMultiple && s.ExitExecution == RutaMirrorExitExecution.OnBarClose
+					&& s.UseHeikinAshiFilter && s.UseVolumeFilter && s.UseTrendFilter;
+				sb.AppendLine(tvMode ? "RutaCryptoMirror - TradingView mirror (fills at bar close)" : "RutaCryptoMirror - CUSTOM settings (not the TradingView logic)");
+				sb.AppendLine("Exits: " + ExitRuleText());
 				sb.AppendLine(string.Format(CultureInfo.InvariantCulture, "Bars processed: {0}   (trades allowed from bar {1})", barsSeen, barsRequired));
 				sb.AppendLine(string.Format(CultureInfo.InvariantCulture, "Closed trades: {0}   Win rate: {1:0.0}%", n, n > 0 ? 100.0 * wins / n : 0.0));
 				sb.AppendLine(string.Format(CultureInfo.InvariantCulture, "Net: {0:+0.00;-0.00} pts x contracts   ${1:0.00}   Profit factor: {2}", grossProfitPts - grossLossPts, netMoney,
@@ -1125,6 +1246,24 @@ namespace NinjaTrader.NinjaScript.Strategies
 		public double TakeProfitAtrMultiplier { get; set; }
 
 		[NinjaScriptProperty]
+		[Display(Name = "Stop/Target Units", Description = "AtrMultiple = TradingView (the two ATR multipliers above). Dollars = the $ amounts below for the whole position (uses Fixed Contracts).", Order = 6, GroupName = "1. Strategy Conditions (Pine)")]
+		public RutaMirrorExitUnits ExitUnits { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(1.0, double.MaxValue)]
+		[Display(Name = "Stop Loss ($)", Description = "Dollars mode: loss per position at the stop. 1 NQ: $500 = 25 points; 1 MNQ: $500 = 250 points.", Order = 7, GroupName = "1. Strategy Conditions (Pine)")]
+		public double StopLossDollars { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(1.0, double.MaxValue)]
+		[Display(Name = "Take Profit ($)", Description = "Dollars mode: profit per position at the target.", Order = 8, GroupName = "1. Strategy Conditions (Pine)")]
+		public double TakeProfitDollars { get; set; }
+
+		[NinjaScriptProperty]
+		[Display(Name = "Exit Execution", Description = "OnBarClose = TradingView (exit at the close once past the level; can overshoot). StopTargetOrders = real stop + target orders, exact levels.", Order = 9, GroupName = "1. Strategy Conditions (Pine)")]
+		public RutaMirrorExitExecution ExitExecution { get; set; }
+
+		[NinjaScriptProperty]
 		[Range(1, int.MaxValue)]
 		[Display(Name = "Short Length", Description = "Volume oscillator fast EMA", Order = 1, GroupName = "2. Volume Oscillator (Pine)")]
 		public int OscShortLength { get; set; }
@@ -1253,4 +1392,16 @@ public enum RutaMirrorSizing
 {
 	FixedContracts,
 	RiskPerTrade
+}
+
+public enum RutaMirrorExitUnits
+{
+	AtrMultiple,
+	Dollars
+}
+
+public enum RutaMirrorExitExecution
+{
+	OnBarClose,
+	StopTargetOrders
 }

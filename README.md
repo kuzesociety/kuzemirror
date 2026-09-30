@@ -44,6 +44,7 @@ Chart setup for a fair comparison:
 | RSI Longitud | RSI Length | **14** (the code default is 12; your chart uses 14) |
 | `atr(14)`, `sma(close, 10)` (hard-coded) | ATR Length / Trend SMA Length | 14 / 10 |
 | Lookback Candles = 7 | *(not ported: the Pine code never uses it)* | |
+| *(new, not in Pine)* | Stop/Target Units, Stop Loss ($), Take Profit ($), Exit Execution | AtrMultiple, 1000, 1000, OnBarClose = TradingView. See section 9. |
 
 **Check the Volume MA length.** The RSI source is the *Volume MA line of TradingView's Volume indicator*. The `Vol. 10` in the volume pane suggests MA length 10. Open that indicator's settings and put the same length in `Volume MA Length`. If the source dropdown actually says `Vol.: Volume` and not `Volume MA`, set RSI Source = `Volume`.
 
@@ -168,7 +169,34 @@ Important:
 * `FixedContracts` (default): always *Fixed Contracts*.
 * `RiskPerTrade`: `floor(Risk Per Trade $ / (SL ATR multiplier × ATR × point value))`, capped at *Max Contracts*. This is the Pine script's non-martingale "USD" sizing: its `qty = initial_size / (sl_multiplier × atr)` loses `initial_size` at the stop.
 
-Size never changes *when* or *at what price* it trades.
+With ATR exits, size never changes *when* or *at what price* it trades.
+
+### Dollar stops and targets
+
+**Stop/Target Units = Dollars** replaces the two ATR multipliers with **Stop Loss ($)** and **Take Profit ($)** for the whole position. It always uses *Fixed Contracts*. Dollars become a distance in points:
+
+| | $500 | $1000 | $1500 | $2000 |
+|---|---|---|---|---|
+| 1 NQ ($20/pt) | 25 pts | 50 pts | 75 pts | 100 pts |
+| 1 MNQ ($2/pt) | 250 pts | 500 pts | 750 pts | 1000 pts |
+| 2 NQ | 12.5 pts | 25 pts | 37.5 pts | 50 pts |
+
+So with a fixed number of contracts, optimizing the dollars *is* optimizing the stop/target distance. The difference from ATR: a fixed distance ignores volatility. 25 points is wide in the overnight session and narrow at the 9:30 open. The optimizer can tell you which works better on your data.
+
+**Exit Execution**:
+* `OnBarClose` (TradingView): exits at the close once price is past the level. A "$500" stop can lose more on a fast bar.
+* `StopTargetOrders`: real stop and target orders (OCO) at the exact levels. A stop fills at the level, or worse only on a gap. If one bar touches both levels, the chart markers and stats box assume the stop filled first; NinjaTrader's backtest decides on its own.
+
+**Choosing contracts:** pick the *distance* first (that's what the optimizer tests). Then set contracts from your account: risking about 0.5–1% per trade is common. Don't optimize contracts: more contracts only scale profit and loss up and down.
+
+**Break-even win rate** = loss / (loss + win):
+
+| Loss \ Win | $500 | $1000 | $1500 |
+|---|---|---|---|
+| **$500** | 50% | 33% | 25% |
+| **$1000** | 67% | 50% | 40% |
+| **$1500** | 75% | 60% | 50% |
+| **$2000** | 80% | 67% | 57% |
 
 ## 10. How the port was verified
 
@@ -177,6 +205,7 @@ Size never changes *when* or *at what price* it trades.
 * compiles the shipped `RutaCryptoMirror.cs` as **C# 5**, NinjaTrader 8's language level, against stand-ins for the NinjaTrader API;
 * runs it on 6 synthetic 5-minute datasets and checks that every TradingView fill produces exactly one NinjaTrader order on the same bar, and that `Calculate = OnEachTick` gives the same trades as `OnBarClose`;
 * recomputes everything with an independent Python version of the Pine script. Result: **0 mismatches over 36,000 bars and 295 trades**, on every indicator value, both conditions, the position, and every entry and exit time, price and reason.
+* recomputes the dollar-exit modes ($500 stop / $1000 target, both on-close and with stop/target orders): same trades, setups and report rows;
 * recomputes the setup report the same way: all 848 RSI-trigger setups (filters, blocker, outcome, R) and every report row match. A run with the SMA filter switched off matches too. Every real TP/SL trade has the same hindsight outcome as its setup.
 
 This proves the C# follows the Pine script exactly. It does not replace the real side-by-side check in section 3: neither TradingView nor NinjaTrader can run in this environment, so the compile was against stand-ins, not NinjaTrader itself.

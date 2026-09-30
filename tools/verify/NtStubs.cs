@@ -31,6 +31,7 @@ namespace NinjaTrader.Cbi
 {
 	public enum TimeInForce { Day, Gtc }
 	public enum MarketPosition { Flat, Long, Short }
+	public enum CalculationMode { Currency, Percent, Price, Ticks, Pips }
 	public class MasterInstrument { public double PointValue = 20; public double TickSize = 0.25; }
 	public class Instrument
 	{
@@ -178,6 +179,8 @@ namespace NinjaTrader.NinjaScript.Strategies
 		public void EnterShort(int quantity, string signalName) { Orders.Add(CurrentBar + " EnterShort " + quantity + " " + signalName); }
 		public void ExitLong(string signalName, string fromEntrySignal) { Orders.Add(CurrentBar + " ExitLong " + signalName + " " + fromEntrySignal); }
 		public void ExitShort(string signalName, string fromEntrySignal) { Orders.Add(CurrentBar + " ExitShort " + signalName + " " + fromEntrySignal); }
+		public void SetStopLoss(string fromEntrySignal, CalculationMode mode, double value, bool isSimulatedStop) { Orders.Add(CurrentBar + " SetStopLoss " + fromEntrySignal + " " + mode + " " + value); }
+		public void SetProfitTarget(string fromEntrySignal, CalculationMode mode, double value) { Orders.Add(CurrentBar + " SetProfitTarget " + fromEntrySignal + " " + mode + " " + value); }
 
 		protected virtual void OnStateChange() { }
 		protected virtual void OnBarUpdate() { }
