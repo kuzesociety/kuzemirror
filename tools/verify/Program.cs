@@ -129,6 +129,23 @@ public static class Program
 		return h;
 	}
 
+	// After a session's closed trades reach the goal (minus tolerance) or the max loss, no trade may start in that session
+	private static bool NoEntryAfterDayDone(Harness h, List<BarData> data, double goalReached, double lossReached)
+	{
+		int[] session = new int[data.Count];
+		for (int i = 0, k = 0; i < data.Count; i++) { if (IsSessionStart(data[i])) k++; session[i] = k; }
+		Dictionary<int, double> pnl = new Dictionary<int, double>();
+		Dictionary<int, int> doneAtBar = new Dictionary<int, int>();
+		foreach (RutaCryptoMirror.TvEngine.TvTrade t in h.EngineForTest.Trades)
+		{
+			int sx = session[t.ExitBar];
+			if (!pnl.ContainsKey(sx)) pnl[sx] = 0;
+			pnl[sx] += t.Points * t.Qty * h.Instrument.MasterInstrument.PointValue;
+			if (!doneAtBar.ContainsKey(sx) && (pnl[sx] >= goalReached || pnl[sx] <= lossReached)) doneAtBar[sx] = t.ExitBar;
+		}
+		return h.EngineForTest.Trades.All(t => !doneAtBar.ContainsKey(session[t.EntryBar]) || t.EntryBar <= doneAtBar[session[t.EntryBar]]);
+	}
+
 	private static int failures;
 	private static void Check(bool ok, string what)
 	{
@@ -338,6 +355,29 @@ public static class Program
 		Check(pd100.EngineForTest.Candidates.Any(x => !x.Taken && (x.Blockers == "PDH" || x.Blockers == "PDL")), "PD filter at 100%: skipped setups name PDH / PDL as the blocker");
 		Check(pd.EngineForTest.Trades.Count > pd100.EngineForTest.Trades.Count, "PD filter: 50% allows more trades than 100% (" + pd.EngineForTest.Trades.Count + " vs " + pd100.EngineForTest.Trades.Count + ")");
 		Check(!a.EngineForTest.StatsText(200).Contains("PDH/PDL"), "PDH/PDL filter off: no PDH/PDL line in the stats box");
+
+		// ---- Daily rules: the planned prop setup (MNQ, $1500 / $750, PD 50%, goal $1500 -$100, max loss $2000) ----
+		Harness daily = RunCustom(bars, h => { h.Instrument.MasterInstrument.PointValue = 2; h.ExitUnits = RutaMirrorExitUnits.DollarsSizedByAtr;
+			h.StopLossDollars = 1500; h.TakeProfitDollars = 750; h.MaxContracts = 40; h.ExitExecution = RutaMirrorExitExecution.StopTargetOrders;
+			h.UsePdhPdlFilter = true; h.PdLevelPercent = 50; h.DailyProfitGoal = 1500; h.DailyGoalTolerance = 100; h.DailyMaxLoss = 2000; }, outDir, "daily");
+		Check(daily.EngineForTest.Trades.Count > 0, "daily rules: trades (" + daily.EngineForTest.Trades.Count + ")");
+		Check(NoEntryAfterDayDone(daily, bars, 1400, -2000), "daily rules: no new trade once a session reached +$1400 or -$2000");
+		Check(daily.EngineForTest.Candidates.Any(x => x.Blockers == "daily goal" || x.Blockers == "loss room" || x.Blockers == "daily loss"), "daily rules: blocked signals are labelled");
+		Check(daily.EngineForTest.StatsText(200).Contains("Today: "), "daily rules: stats box shows today's result");
+		Harness dailyClose = RunCustom(bars, h => { h.DailyProfitGoal = 1500; h.DailyGoalTolerance = 100; h.DailyMaxLoss = 1000; }, outDir, "daily_close");
+		Check(NoEntryAfterDayDone(dailyClose, bars, 1400, -1000), "daily rules (on-close exits): no new trade once a session is done");
+
+		// ---- Trading hours ----
+		TimeSpan xs = new TimeSpan(18, 0, 0), xe = new TimeSpan(16, 45, 0);
+		Harness hx = RunCustom(bars, h => { h.UseTradingHours = true; h.TradeStartTime = new DateTime(2000, 1, 1, 18, 0, 0); h.TradeEndTime = new DateTime(2000, 1, 1, 16, 45, 0); }, outDir, "hours_x");
+		Check(hx.EngineForTest.Trades.All(t => t.EntryTime.TimeOfDay >= xs || t.EntryTime.TimeOfDay < xe), "hours 18:00-16:45: every entry inside the window");
+		Check(hx.EngineForTest.Trades.All(t => (t.ExitTime.TimeOfDay >= xs || t.ExitTime.TimeOfDay < xe) || (t.ExitSignal == "End time" && t.ExitTime.TimeOfDay == xe)),
+			"hours 18:00-16:45: flattened on the first bar at 16:45, never held past it");
+		Check(hx.EngineForTest.Trades.Any(t => t.ExitSignal == "End time"), "hours: some trades are flattened at the end time");
+		TimeSpan rs = new TimeSpan(9, 30, 0), re = new TimeSpan(16, 0, 0);
+		Harness hr = RunCustom(bars, h => { h.UseTradingHours = true; h.TradeStartTime = new DateTime(2000, 1, 1, 9, 30, 0); h.TradeEndTime = new DateTime(2000, 1, 1, 16, 0, 0); h.FlattenAtEndTime = false; }, outDir, "hours_rth");
+		Check(hr.EngineForTest.Trades.All(t => t.EntryTime.TimeOfDay >= rs && t.EntryTime.TimeOfDay < re), "hours 09:30-16:00: every entry inside the window");
+		Check(!hr.EngineForTest.Trades.Any(t => t.ExitSignal == "End time"), "hours without flatten: no End time exits");
 
 		Console.WriteLine(failures == 0 ? "ALL C# CHECKS PASSED" : failures + " C# CHECK(S) FAILED");
 		return failures == 0 ? 0 : 1;

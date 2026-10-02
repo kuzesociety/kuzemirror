@@ -20,7 +20,8 @@ The martingale and leverage parts are removed. Nothing in the entry or exit logi
 **Side-by-side copies:** each version installs next to the others under its own name, because every name inside is changed (strategy, dropdown types, drawing tags, CSV folder). They are generated with `tools/make_variant.sh <suffix>`. Settings templates are saved per strategy name, so re-enter your values in each one.
 * `RutaCryptoMirrorV2.cs`: frozen snapshot with the dollar exits and ATR sizing. Don't regenerate it.
 * `RutaCryptoMirrorV3.cs`: frozen. V2 plus the **Use PDH/PDL filter** switch (off = identical to V2).
-* `RutaCryptoMirrorV4.cs`: V3 plus **PDH/PDL Range Level (%)** (default 50 = middle of the previous session's range; 100 = identical to V3's filter; filter off = identical to V2/V3).
+* `RutaCryptoMirrorV4.cs`: frozen. V3 plus **PDH/PDL Range Level (%)** (default 50 = middle of the previous session's range; 100 = identical to V3's filter; filter off = identical to V2/V3).
+* `RutaCryptoMirrorV5.cs`: V4 plus **9. Daily rules & trading hours** (all off = identical to V4).
 
 **Nothing on the chart?**
 * No status box at the bottom-left: the strategy is not running. Check the **Enabled** box. Then look at **Control Center → Log** for a red line mentioning RutaCryptoMirror.
@@ -202,6 +203,24 @@ In general: long line = PDL + level × (PDH − PDL), short line = PDH − level
 * The first, partial session on the chart is never used. Until one full session has been seen, the filter allows no trades.
 * While it is on, the chart shows PDH / PDL as gold lines and the long / short lines as dashed green / red (at 50 they sit on top of each other). The stats box shows the current values. Skipped setups name the blocker (`PDH` / `PDL` at level 100, otherwise e.g. `PD50%`), and the setup report has a *Blocked ONLY by PD range level* row.
 
+### Daily rules & trading hours (group 9, V5)
+
+All off by default. A "day" is one session of the chart's Trading Hours (CME ETH: 6 pm to 5 pm New York), the same day prop firms use.
+
+| Setting | What it does |
+|---|---|
+| **Daily Profit Goal ($)** | Once today's closed trades reach it, no new trades until the next session. 0 = off. |
+| **Daily Goal Tolerance ($)** | The goal also counts this much below it: goal 1500 with tolerance 100 means done from +$1,400. Covers ticks, slippage and fees. |
+| **Daily Max Loss ($)** | Once today's closed trades lose this much, no new trades until the next session. 0 = off. |
+| **Block trades that could break max loss** | Don't open a trade if hitting its full stop would push today past the Daily Max Loss. Example: max loss $2,000, already −$1,500 today, so a new $1,500-risk trade is skipped. |
+| **Use Trading Hours**, **Start Time**, **End Time** | Only open trades between Start and End, by bar close time in the chart's time zone. The window may cross midnight (18:00 → 16:45). |
+| **Flatten at End Time** | Close any open trade on the first bar at or after the End Time. |
+
+Details:
+* A reversal counts the closed trade first. If that close reaches the goal or the max loss, the strategy just exits instead of reversing. Any other time an opposite signal is blocked, it still closes the open trade ("Signal exit").
+* Today's result uses the strategy's own trade prices before commissions (the same numbers as the stats box); the tolerance absorbs the difference. Open trades are limited by their stop orders, not by the daily numbers.
+* On the chart: "DAILY GOAL / DAILY MAX LOSS - done for today" at the bar where it happened. Blocked signals show `skip buy: daily goal`, `loss room` or `hours`, and the stats box shows today's result and status.
+
 ## 8. Differences that cannot be removed
 
 * **Fill price.** No real broker can fill at the close of a bar that has already closed. NinjaTrader's real fills come one tick later; TradingView's simulated fill is the close. The drawn markers and the stats box use TradingView's price; NinjaTrader's Strategy Performance uses the real fills.
@@ -270,6 +289,7 @@ On NQ the size barely changes, so the stop ends up wherever the dollars put it. 
 * recomputes everything with an independent Python version of the Pine script. Result: **0 mismatches over 36,000 bars and 295 trades**, on every indicator value, both conditions, the position, and every entry and exit time, price and reason.
 * recomputes the dollar-exit modes ($500 stop / $1000 target, both on-close and with stop/target orders) and the ATR-sized mode (MNQ, $1000 / $1500, capped at 12): same trades, contract counts, setups and report rows;
 * recomputes the PDH/PDL levels and the long / short lines, and runs with the filter on at levels 50 and 100: same values on every bar, same trades, setups and report rows. With the filter off, 84 output files (trades in every exit mode, per-bar values, setups, report rows) are identical to the version before the filter was added. At level 100, the trades, setups and report rows are identical to V3's filter;
+* recomputes the daily rules and trading hours: the planned prop setup (MNQ, $1,500 / $750, PD 50%, goal $1,500 − $100, max loss $2,000), on-close exits with daily rules, an 18:00 → 16:45 window with flatten and a 09:30 → 16:00 window without. Every trade, setup and report row matches. With all of them off, 126 output files are identical to V4;
 * recomputes the setup report the same way: all 848 RSI-trigger setups (filters, blocker, outcome, R) and every report row match. A run with the SMA filter switched off matches too. Every real TP/SL trade has the same hindsight outcome as its setup.
 
 This proves the C# follows the Pine script exactly. It does not replace the real side-by-side check in section 3: neither TradingView nor NinjaTrader can run in this environment, so the compile was against stand-ins, not NinjaTrader itself.

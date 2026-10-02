@@ -119,7 +119,7 @@ def intrabar(d, stop, target, o, h, l):
 
 
 def run(bars, use_ha=True, use_vol=True, use_sma=True, use_pd=False, pd_level=100.0, units='atr', execution='close',
-        sl_usd=1000.0, tp_usd=1000.0, qty=1, pv=20.0, tick=0.25, max_qty=10):
+        sl_usd=1000.0, tp_usd=1000.0, qty=1, pv=20.0, tick=0.25, max_qty=10, daily=None):
     o = [b['open'] for b in bars]
     h = [b['high'] for b in bars]
     l = [b['low'] for b in bars]
@@ -181,28 +181,77 @@ def run(bars, use_ha=True, use_vol=True, use_sma=True, use_pd=False, pd_level=10
             return usd_to_points(sl_usd if which == 'sl' else tp_usd, contracts(i), pv, tick)
         return a[i] * P[which]
 
+    # --- daily rules / trading hours (off unless 'daily' is given) ---
+    dr = dict(goal=0.0, tol=100.0, max_loss=0.0, block=True, hours=None, flatten=True)
+    dr.update(daily or {})
+    tod = [b.get('tod', 0) for b in bars]
+
+    def in_window(t):
+        if dr['hours'] is None:
+            return True
+        start, end = dr['hours']
+        if start == end:
+            return True
+        return start <= t < end if start < end else (t >= start or t < end)
+
+    day = dict(pnl=0.0, trades=0, done=None)
+
+    def close_trade(i, name, price):
+        nonlocal position
+        trades.append((entry_bar, 'Long' if position > 0 else 'Short', entry_px, i, name, price, pos_qty))
+        day['pnl'] += (price - entry_px) * position * pos_qty * pv
+        day['trades'] += 1
+        if day['done'] is None:
+            if dr['goal'] > 0 and day['pnl'] >= dr['goal'] - dr['tol']:
+                day['done'] = 'daily goal'
+            elif dr['max_loss'] > 0 and day['pnl'] <= -dr['max_loss']:
+                day['done'] = 'daily loss'
+        position = 0
+
+    def block_reason(i, ps, in_hours):
+        if not in_hours:
+            return 'hours'
+        if day['done'] is not None:
+            return day['done']
+        after = day['pnl'] + ((c[i] - entry_px) * ps * pos_qty * pv if ps != 0 else 0.0)
+        if dr['goal'] > 0 and after >= dr['goal'] - dr['tol']:
+            return 'daily goal'
+        if dr['max_loss'] > 0 and after <= -dr['max_loss']:
+            return 'daily loss'
+        if dr['max_loss'] > 0 and dr['block'] and after - dist(i, 'sl') * contracts(i) * pv < -dr['max_loss']:
+            return 'loss room'
+        return None
+
     # --- script execution + broker emulator (process_orders_on_close=true) ---
     position = 0          # signed contracts
     entry_bar = entry_px = None
     tp = sl = NA
-    trades, pos_before, entry_dir = [], [], [0] * n
+    trades, pos_before, entry_dir, blocks = [], [], [0] * n, [None] * n
     pos_qty = 0
     for i in range(n):
+        if new_session[i]:
+            day.update(pnl=0.0, trades=0, done=None)
         if execution == 'orders' and position != 0:
             res, fill = intrabar(position, sl, tp, o[i], h[i], l[i])
             if res:
-                trades.append((entry_bar, 'Long' if position > 0 else 'Short', entry_px, i,
-                               'Stop Loss' if res < 0 else 'Take Profit', fill, pos_qty))
-                position = 0
+                close_trade(i, 'Stop Loss' if res < 0 else 'Take Profit', fill)
+        in_hours = in_window(tod[i])
+        if not in_hours and dr['flatten'] and position != 0:
+            close_trade(i, 'End time', c[i])
         lc = longcond[i] and i >= WARMUP
         sc = shortcond[i] and i >= WARMUP
         ps = position                      # strategy.position_size seen by the script
         pos_before.append((ps > 0) - (ps < 0))
+        sig = 0
+        if lc and ps <= 0: sig = 1
+        if sc and ps >= 0: sig = -1
+        block = block_reason(i, ps, in_hours) if sig else None
+        blocks[i] = (sig, block)
         orders = []                        # placed in script order
-        if lc and ps <= 0:
+        if sig == 1 and block is None:
             sl, tp = c[i] - dist(i, 'sl'), c[i] + dist(i, 'tp')
             orders.append(('entry', 'Long', 1))
-        if sc and ps >= 0:
+        if sig == -1 and block is None:
             sl, tp = c[i] + dist(i, 'sl'), c[i] - dist(i, 'tp')
             orders.append(('entry', 'Short', -1))
         close_comment = None
@@ -219,8 +268,7 @@ def run(bars, use_ha=True, use_vol=True, use_sma=True, use_pd=False, pd_level=10
         for kind, name, side in orders:
             if kind == 'entry':
                 if position != 0 and (position > 0) != (side > 0):
-                    trades.append((entry_bar, 'Long' if position > 0 else 'Short', entry_px, i, name, c[i], pos_qty))
-                    position = 0
+                    close_trade(i, name, c[i])
                 if position == 0:
                     position = side        # direction; size in pos_qty
                     pos_qty = contracts(i)
@@ -230,11 +278,13 @@ def run(bars, use_ha=True, use_vol=True, use_sma=True, use_pd=False, pd_level=10
                 # a close order can only reduce the position it was placed against; if that position
                 # was reversed by an earlier order of this bar, it is cancelled
                 if position != 0 and (position > 0) == (side < 0):
-                    trades.append((entry_bar, 'Long' if position > 0 else 'Short', entry_px, i, name, c[i], pos_qty))
-                    position = 0
+                    close_trade(i, name, c[i])
+        # a blocked reversal still closes the open trade
+        if sig != 0 and block is not None and position != 0 and position == ps:
+            close_trade(i, 'Signal exit', c[i])
 
     # --- setup report: every bar/side followed forward with the SL/TP-on-close rule ---
-    buckets = {(b, sd): [0, 0, 0, 0.0] for b in range(10) for sd in ('long', 'short')}
+    buckets = {(b, sd): [0, 0, 0, 0.0] for b in range(11) for sd in ('long', 'short')}
     setups = []
     for i in range(WARMUP, n):
         if na(a[i]) or not a[i] > 0:
@@ -270,7 +320,11 @@ def run(bars, use_ha=True, use_vol=True, use_sma=True, use_pd=False, pd_level=10
                     groups.add({'HA': 5, 'VOL': 6, 'SMA': 7, pd_name: 8}[failed[0]])
                 if not failed and not p_ok:
                     groups.add(9)
-                blockers = ' '.join(failed) if failed else ('' if p_ok else 'in position')
+                sig_i, block_i = blocks[i]
+                eblock = block_i if sig_i == d else None
+                if not failed and p_ok and eblock is not None:
+                    groups.add(10)
+                blockers = ' '.join(failed) if failed else ('in position' if not p_ok else (eblock or ''))
                 rr = (fill - entry) * d / risk if res_bar is not None else None
                 setups.append((i, 'long' if d > 0 else 'short', int(h_ok), int(v_ok), int(s_ok), int(pdk), int(p_ok),
                                int(entry_dir[i] == d), blockers, {1: 'win', -1: 'loss', 0: 'open'}[outcome], res_bar,
@@ -330,6 +384,7 @@ def main(d):
     bars = [{k: float(r[k]) for k in ('open', 'high', 'low', 'close', 'volume')} for r in raw]
     for b, r in zip(bars, raw):
         b['new_session'] = r.get('new_session') == '1'
+        b['tod'] = int(r['time'][11:13]) * 60 + int(r['time'][14:16])     # bar close time of day, minutes
     times = [r['time'][:16] for r in raw]
     ref = run(bars, pd_level=50.0)     # the strategy's default level (filter off)
 
@@ -408,7 +463,12 @@ def main(d):
                        ('usd_orders', dict(units='usd', sl_usd=500.0, tp_usd=1000.0, execution='orders')),
                        ('usd_atr', dict(units='usd_atr', sl_usd=1000.0, tp_usd=1500.0, execution='orders', pv=2.0, max_qty=12)),
                        ('pd', dict(use_pd=True, pd_level=50.0)),
-                       ('pd100', dict(use_pd=True, pd_level=100.0))):
+                       ('pd100', dict(use_pd=True, pd_level=100.0)),
+                       ('daily', dict(units='usd_atr', sl_usd=1500.0, tp_usd=750.0, execution='orders', pv=2.0, max_qty=40,
+                                      use_pd=True, pd_level=50.0, daily=dict(goal=1500.0, tol=100.0, max_loss=2000.0))),
+                       ('daily_close', dict(daily=dict(goal=1500.0, tol=100.0, max_loss=1000.0))),
+                       ('hours_x', dict(daily=dict(hours=(18 * 60, 16 * 60 + 45), flatten=True))),
+                       ('hours_rth', dict(daily=dict(hours=(9 * 60 + 30, 16 * 60), flatten=False)))):
         refm = run(bars, **kw)
         t_ok = load_trades(d + '/nt_trades_%s.csv' % suffix) == ref_trade_rows(refm, times)
         s_ok = load_setups(d + '/nt_setups_%s.csv' % suffix) == ref_setup_rows(refm, times)

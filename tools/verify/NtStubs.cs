@@ -43,6 +43,8 @@ namespace NinjaTrader.Cbi
 namespace NinjaTrader.Gui
 {
 	public enum DashStyleHelper { Dash, DashDot, DashDotDot, Dot, Solid }
+	[AttributeUsage(AttributeTargets.Property)]
+	public class PropertyEditorAttribute : Attribute { public PropertyEditorAttribute(string key) { } }
 	public enum PlotStyle { Bar, Block, Cross, Dot, Hash, HLine, Line, Square, TriangleDown, TriangleUp }
 	public class Stroke
 	{
