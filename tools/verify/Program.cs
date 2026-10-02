@@ -389,7 +389,7 @@ public static class Program
 			h.UseAccountRotation = true; h.PropAccountList = "TS-1=Topstep50K, TS-2=Topstep50K, LU-1=LucidFlex50K, LU-2=LucidPro50K"; };
 		Harness rotEvery = RunCustom(bars, h => { plan(h); h.RotationMode = RutaMirrorRotationMode.EveryTrade; }, outDir, "rot_every");
 		Harness rotDay = RunCustom(bars, h => { plan(h); h.RotationMode = RutaMirrorRotationMode.UntilDayDone; h.BlockTradesOverAccountMaxLoss = true; }, outDir, "rot_day");
-		Harness rotDll = RunCustom(bars, h => { plan(h); h.PropAccountList = "A=Topstep50K-DLL; B=Custom; C=LucidPro50K"; h.CustomProfitTarget = 3000; h.CustomMaxLoss = 1500;
+		Harness rotDll = RunCustom(bars, h => { plan(h); h.PropAccountList = "A=Topstep50K-DLL; B=Custom; C=LucidPro50K-DLL"; h.CustomProfitTarget = 3000; h.CustomMaxLoss = 1500;
 			h.CustomDrawdownType = RutaMirrorDrawdownType.IntradayTrailing; h.CustomDailyLossLimit = 0; h.CustomConsistencyPct = 40; }, outDir, "rot_dll");
 		Harness rotClose = RunCustom(bars, h => { h.UseAccountRotation = true; h.PropAccountList = "X=Custom, Y=Topstep100K"; h.RotationMode = RutaMirrorRotationMode.UntilDayDone;
 			h.RestartFinishedAccounts = false; h.CustomProfitTarget = 2500; h.CustomMaxLoss = 1200; h.CustomDrawdownType = RutaMirrorDrawdownType.Static;
@@ -403,9 +403,9 @@ public static class Program
 		Check(new Harness[] { rotEvery, rotDay, rotDll, rotClose }.Sum(h => h.EngineForTest.AccountEvents.Count(x => x.Event == "PASSED" || x.Event == "FAILED")) > 0,
 			"rotation: evaluations finish (passed or failed) over 6000 bars");
 		List<string> used = rotEvery.EngineForTest.Trades.Select(t => t.Account.Split(' ')[0]).Distinct().OrderBy(x => x).ToList();
-		Check(string.Join(",", used.ToArray()) == "LU-1,TS-1,TS-2", "rotation every trade: TS-1, TS-2 and LU-1 take trades (" + string.Join(",", used.ToArray()) + ")");
-		Check(rotEvery.EngineForTest.AccountsDashboard().Contains("CAN'T FIT $1,") && !rotEvery.EngineForTest.AccountsDashboard().Contains("next: LU-2"),
-			"rotation: Lucid Pro ($1,200 daily limit) never takes a $1,500-risk trade with 'Block trades that could break max loss' on, and the dashboard says why");
+		Check(string.Join(",", used.ToArray()) == "LU-1,LU-2,TS-1,TS-2", "rotation every trade: all 4 accounts take trades, Lucid Pro without daily limit included (" + string.Join(",", used.ToArray()) + ")");
+		Check(!rotDll.EngineForTest.Trades.Any(t => t.Account.StartsWith("C ")) && rotDll.EngineForTest.AccountsDashboard().Contains("CAN'T FIT $1,"),
+			"rotation: Lucid Pro WITH the $1,200 daily limit never takes a $1,500-risk trade (block on) and the dashboard says why");
 		Check(rotClose.EngineForTest.AccountEvents.Count(x => x.Event == "START") == 2, "no restarts: each slot runs one evaluation");
 		Check(rotDll.EngineForTest.Trades.Any(t => t.ExitSignal == "Firm daily loss" || t.ExitSignal == "Account max loss") ||
 			rotClose.EngineForTest.Trades.Any(t => t.ExitSignal == "Firm daily loss" || t.ExitSignal == "Account max loss"), "rotation: firm limits close trades intrabar");

@@ -1263,7 +1263,8 @@ namespace NinjaTrader.NinjaScript.Strategies
 					case "topstep100k":		return new PropRules("Topstep 100K", 6000, 3000, RutaMirrorV6DrawdownType.EodTrailing, 0, 50);
 					case "topstep150k":		return new PropRules("Topstep 150K", 9000, 4500, RutaMirrorV6DrawdownType.EodTrailing, 0, 50);
 					case "lucidflex50k":	return new PropRules("Lucid Flex 50K", 3000, 2000, RutaMirrorV6DrawdownType.EodTrailing, 0, 50);
-					case "lucidpro50k":		return new PropRules("Lucid Pro 50K", 3000, 2000, RutaMirrorV6DrawdownType.EodTrailing, 1200, 0);
+					case "lucidpro50k":		return new PropRules("Lucid Pro 50K", 3000, 2000, RutaMirrorV6DrawdownType.EodTrailing, 0, 0);		// daily loss limit is optional at purchase
+					case "lucidpro50k-dll":	return new PropRules("Lucid Pro 50K+DLL", 3000, 2000, RutaMirrorV6DrawdownType.EodTrailing, 1200, 0);
 					case "custom":			return new PropRules("Custom", st.CustomTarget, st.CustomMaxLoss, st.CustomDrawdown, st.CustomDailyLossLimit, st.CustomConsistencyPct);
 					default:				return null;
 				}
@@ -2132,7 +2133,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 		[Display(Name = "Use Account Rotation", Description = "Simulate prop accounts: each trade goes to one account by the rotation mode, with each firm's rules. Daily goal / loss (group 9) then apply per account. Off = unchanged logic.", Order = 1, GroupName = "10. Prop accounts (simulated rotation)")]
 		public bool UseAccountRotation { get; set; }
 
-		[Display(Name = "Accounts", Description = "name=plan, separated by commas. Plans: Topstep50K, Topstep50K-DLL, Topstep100K, Topstep150K, LucidFlex50K, LucidPro50K, Custom.", Order = 2, GroupName = "10. Prop accounts (simulated rotation)")]
+		[Display(Name = "Accounts", Description = "name=plan, separated by commas. Plans: Topstep50K, Topstep50K-DLL, Topstep100K, Topstep150K, LucidFlex50K, LucidPro50K, LucidPro50K-DLL, Custom.", Order = 2, GroupName = "10. Prop accounts (simulated rotation)")]
 		public string PropAccountList { get; set; }
 
 		[NinjaScriptProperty]

@@ -243,7 +243,8 @@ Details:
 | `Topstep100K` | $6,000 | $3,000 | none | 50% |
 | `Topstep150K` | $9,000 | $4,500 | none | 50% |
 | `LucidFlex50K` | $3,000 | $2,000 | none | 50% |
-| `LucidPro50K` | $3,000 | $2,000 | $1,200 | none |
+| `LucidPro50K` | $3,000 | $2,000 | none (the daily limit is optional at purchase) | none |
+| `LucidPro50K-DLL` | $3,000 | $2,000 | $1,200 | none |
 | `Custom` | the *Custom:* settings in group 10 (any target, max loss, drawdown type, daily limit, consistency) | | | |
 
 **How the rules are simulated**
@@ -256,7 +257,7 @@ Details:
 **Reading the dashboard:** Status is `ACTIVE`, `IN TRADE`, `DONE TODAY (reason)`, `PASSED`, `FAILED`, or `CAN'T FIT $X RISK` (the next trade's full stop would break this account's limit). **Room** is the distance to the max loss line, and **Pass/Fail** counts finished evaluations in that slot. The bottom line shows evaluations, passed, failed, pass rate, average trading days to pass, passes per month and fees. PASSED / FAILED are also marked on the chart. The Output window gets the table when loading finishes. With *Export Trades CSV*, the trades file gets an **Account** column and `<instrument>_accounts.csv` lists every event.
 
 **Things the simulation shows about the $1,500 / $750 plan**
-* **Lucid Pro 50K can't take it.** Its $1,200 daily limit is smaller than the $1,500 risk, so with "Block trades that could break max loss" on it shows `CAN'T FIT` and never trades. Use Lucid Flex, or a smaller Stop Loss $.
+* **A Lucid Pro account *with* the $1,200 daily limit (`LucidPro50K-DLL`) can't take it.** The limit is smaller than the $1,500 risk, so with "Block trades that could break max loss" on it shows `CAN'T FIT` and never trades. Lucid Pro without the daily limit (`LucidPro50K`) and Lucid Flex can. Lucid 50K allows up to 4 minis / 40 micros, which matches Max Contracts = 40.
 * **"Block trades that could fail the account" can leave accounts stuck.** After one $1,500 loss only $500 of room is left, so the account never trades again and never passes or fails. Leave it off for this plan, which is what the pass-rate simulation assumed.
 
 **Not modeled:** commissions and slippage, minimum trading days, payout rules, and rule changes by the firms. The end of the day is the end of the chart's session. Best day uses closed trades.

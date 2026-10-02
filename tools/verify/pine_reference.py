@@ -203,7 +203,8 @@ def run(bars, use_ha=True, use_vol=True, use_sma=True, use_pd=False, pd_level=10
         'topstep100k': ('Topstep 100K', 6000.0, 3000.0, 'eod', 0.0, 50.0),
         'topstep150k': ('Topstep 150K', 9000.0, 4500.0, 'eod', 0.0, 50.0),
         'lucidflex50k': ('Lucid Flex 50K', 3000.0, 2000.0, 'eod', 0.0, 50.0),
-        'lucidpro50k': ('Lucid Pro 50K', 3000.0, 2000.0, 'eod', 1200.0, 0.0),
+        'lucidpro50k': ('Lucid Pro 50K', 3000.0, 2000.0, 'eod', 0.0, 0.0),
+        'lucidpro50k-dll': ('Lucid Pro 50K+DLL', 3000.0, 2000.0, 'eod', 1200.0, 0.0),
     }
     R = dict(accounts=[], mode='every', block_acct=False, restart=True,
              custom=('Custom', 3000.0, 2000.0, 'eod', 0.0, 50.0))
@@ -656,7 +657,7 @@ def main(d):
     rot_runs = (
         ('rot_every', dict(PLAN, rot=dict(accounts=TS_LU, mode='every'))),
         ('rot_day', dict(PLAN, rot=dict(accounts=TS_LU, mode='day', block_acct=True))),
-        ('rot_dll', dict(PLAN, rot=dict(accounts=[('A', 'Topstep50K-DLL'), ('B', 'Custom'), ('C', 'LucidPro50K')], mode='every',
+        ('rot_dll', dict(PLAN, rot=dict(accounts=[('A', 'Topstep50K-DLL'), ('B', 'Custom'), ('C', 'LucidPro50K-DLL')], mode='every',
                                         custom=('Custom', 3000.0, 1500.0, 'intraday', 0.0, 40.0)))),
         ('rot_close', dict(rot=dict(accounts=[('X', 'Custom'), ('Y', 'Topstep100K')], mode='day', restart=False,
                                     custom=('Custom', 2500.0, 1200.0, 'static', 600.0, 0.0)))),
