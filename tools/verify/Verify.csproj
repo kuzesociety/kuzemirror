@@ -11,8 +11,12 @@
     <RootNamespace>Verify</RootNamespace>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="WpfFakes.cs" />
     <Compile Include="NtStubs.cs" />
+    <Compile Include="FakeBroker.cs" />
+    <Compile Include="RouterTests.cs" />
     <Compile Include="Program.cs" />
     <Compile Include="../../ninjatrader/Strategies/RutaCryptoMirror.cs" />
+    <Compile Include="../../ninjatrader/AddOns/RutaPropRouter.cs" />
   </ItemGroup>
 </Project>

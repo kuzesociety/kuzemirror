@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Compiles EVERY shipped NinjaScript file together (strategies, all versions, Prop Account Manager add-on), as
+       NinjaTrader 8 does, as C# 5 against the REAL WPF reference assemblies and stubbed NinjaTrader types.
+       It only compiles (WPF can't run on Linux). Needs network access once to download the WPF reference pack. -->
+  <PropertyGroup>
+    <OutputType>Library</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <LangVersion>5</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <NoWarn>CS0108;CS0114</NoWarn>
+    <WpfRef>$(NuGetPackageRoot)microsoft.windowsdesktop.app.ref/8.0.0/ref/net8.0/</WpfRef>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageDownload Include="Microsoft.WindowsDesktop.App.Ref" Version="[8.0.0]" />
+  </ItemGroup>
+  <ItemGroup>
+    <Reference Include="PresentationFramework"><HintPath>$(WpfRef)PresentationFramework.dll</HintPath></Reference>
+    <Reference Include="PresentationCore"><HintPath>$(WpfRef)PresentationCore.dll</HintPath></Reference>
+    <Reference Include="WindowsBase"><HintPath>$(WpfRef)WindowsBase.dll</HintPath></Reference>
+    <Reference Include="System.Xaml"><HintPath>$(WpfRef)System.Xaml.dll</HintPath></Reference>
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="../NtStubs.cs" />
+    <Compile Include="UiStubs.cs" />
+    <Compile Include="../../../ninjatrader/Strategies/*.cs" />
+    <Compile Include="../../../ninjatrader/AddOns/*.cs" />
+  </ItemGroup>
+</Project>

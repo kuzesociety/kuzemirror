@@ -10,6 +10,7 @@ using System.IO;
 using System.Linq;
 using System.Text;
 using NinjaTrader.NinjaScript;
+using NinjaTrader.NinjaScript.AddOns;
 using NinjaTrader.NinjaScript.Strategies;
 
 public class Harness : RutaCryptoMirror
@@ -147,6 +148,56 @@ public static class Program
 			if (!doneAtBar.ContainsKey(sx) && (pnl[sx] >= goalReached || pnl[sx] <= lossReached)) doneAtBar[sx] = t.ExitBar;
 		}
 		return h.EngineForTest.Trades.All(t => !doneAtBar.ContainsKey(session[t.EntryBar]) || t.EntryBar <= doneAtBar[session[t.EntryBar]]);
+	}
+
+	// Route to Prop Account Manager: historical bars first, then live bars. With a broker, each live bar's ticks
+	// (open, nearer extreme, other extreme, close) go to the simulated broker before the strategy sees the bar close.
+	private static Harness RunRouted(List<BarData> data, int realtimeFrom, Action<Harness> configure, RutaPropRouter router, FakeBroker broker, DateTime[] clock)
+	{
+		Harness h = NewHarness(false);
+		h.PrintTradeList = false;
+		configure(h);
+		h.Step(State.Configure);
+		h.Step(State.DataLoaded);
+		h.State = State.Historical;
+		h.Bars.Count = data.Count;
+		for (int i = 0; i < data.Count; i++)
+		{
+			BarData b = data[i];
+			if (i == realtimeFrom)
+			{
+				h.Step(State.Transition);
+				h.Step(State.Realtime);
+			}
+			if (broker != null && i >= realtimeFrom)
+			{
+				DateTime start = b.T.AddMinutes(-5);
+				double[] path = b.C >= b.O ? new double[] { b.O, b.L, b.H, b.C } : new double[] { b.O, b.H, b.L, b.C };
+				for (int k = 0; k < 4; k++)
+				{
+					clock[0] = start.AddSeconds(5 + 70 * k);
+					broker.SetPrice(path[k]);
+					router.Poll();
+				}
+			}
+			clock[0] = b.T;
+			Push(h, b);
+			h.CurrentBar = i;
+			h.IsFirstTickOfBar = true;
+			h.Bar();
+		}
+		return h;
+	}
+
+	private static bool SameTrades(List<RutaCryptoMirror.TvEngine.TvTrade> a, List<RutaCryptoMirror.TvEngine.TvTrade> b)
+	{
+		if (a.Count != b.Count)
+			return false;
+		for (int i = 0; i < a.Count; i++)
+			if (a[i].EntryBar != b[i].EntryBar || a[i].ExitBar != b[i].ExitBar || a[i].Direction != b[i].Direction || a[i].Qty != b[i].Qty
+				|| a[i].EntryPrice != b[i].EntryPrice || a[i].ExitPrice != b[i].ExitPrice || a[i].ExitSignal != b[i].ExitSignal)
+				return false;
+		return true;
 	}
 
 	private static int failures;
@@ -412,6 +463,92 @@ public static class Program
 		Harness badSpec = RunCustom(bars.Take(400).ToList(), h => { h.UseAccountRotation = true; h.PropAccountList = "Q=NoSuchFirm, Q2"; }, outDir, "rot_bad");
 		Check(badSpec.EngineForTest.AccountsError != null && badSpec.EngineForTest.AccountsError.Contains("unknown plan 'NoSuchFirm'"), "rotation: a wrong plan name is reported");
 		Console.WriteLine(rotEvery.EngineForTest.AccountsDashboard());
+
+		// ---- Prop Account Manager router (simulated broker) ----
+		RouterTests.Run(Check, outDir);
+
+		// ---- Strategy -> Prop Account Manager ----
+		int live0 = 3000;
+		Action<Harness> routedPlan = h => { plan(h); h.RouteToPropManager = true; };
+		Harness noRules = RunCustom(bars, h => { plan(h); h.DailyProfitGoal = 0; h.DailyMaxLoss = 0; h.UseAccountRotation = false; }, outDir, "route_ref");
+		DateTime[] clock = { bars[0].T };
+		FakeBroker dryBroker = new FakeBroker("TS-1", "TS-2", "LU-1", "LU-2");
+		RutaPropRouter dry = new RutaPropRouter(dryBroker, null, false);
+		dry.Clock = () => clock[0];
+		RutaPropSettings ds = dry.GetSettings();
+		ds.DailyGoal = 0; ds.CustomTarget = 1e9; ds.CustomMaxLoss = 1e9; ds.CustomConsistencyPct = 0;
+		dry.SetSettings(ds);
+		foreach (string acct in new[] { "TS-1", "TS-2", "LU-1", "LU-2" })
+			dry.AddSlot(acct, "Custom");
+		RutaPropRouter.UseForTesting(dry);
+		Harness routed = RunRouted(bars, live0, routedPlan, dry, null, clock);
+		Check(routed.Orders.Count == 0, "route: the strategy sends no orders of its own");
+		Check(SameTrades(routed.EngineForTest.Trades, noRules.EngineForTest.Trades),
+			"route: the strategy takes every signal (its own daily goal / max loss and account simulator are off) - " + routed.EngineForTest.Trades.Count + " trades");
+		List<RutaCryptoMirror.TvEngine.TvTrade> liveTrades = routed.EngineForTest.Trades.Where(t => t.EntryBar >= live0).ToList();
+		double expect = liveTrades.Sum(t => t.Points * t.Qty * 2.0);
+		List<RutaPropRow> dryRows = dry.Rows();
+		Check(Math.Abs(dryRows.Sum(r => r.Pnl) - expect) < 1e-6 && dryRows.Sum(r => r.Trades) == liveTrades.Count && dryRows.All(r => r.Trades >= liveTrades.Count / 4),
+			"route (dry run): only live-bar trades are routed, rotated over 4 accounts, each booked with the strategy's result ($" + expect.ToString("0", CultureInfo.InvariantCulture) + ")");
+		Check(dryRows.Sum(r => r.Days) > 8 && dry.SessionText().Contains(bars.Last(b => IsSessionStart(b)).T.ToString("yyyy-MM-dd")), "route: the strategy reports each new session to the manager");
+
+		string liveCfg = Path.Combine(outDir, "route_live.xml");
+		foreach (string f in new[] { liveCfg, Path.ChangeExtension(liveCfg, ".log") })
+			if (File.Exists(f)) File.Delete(f);
+		FakeBroker lb = new FakeBroker("TS-1", "TS-2", "LU-1", "LU-2");
+		RutaPropRouter live = new RutaPropRouter(lb, liveCfg, false);
+		live.Clock = () => clock[0];
+		live.AddSlot("TS-1", "Topstep50K");
+		live.AddSlot("TS-2", "Topstep50K");
+		live.AddSlot("LU-1", "LucidFlex50K");
+		live.AddSlot("LU-2", "LucidPro50K");
+		live.SetMode(RutaPropMode.Live);
+		RutaPropRouter.UseForTesting(live);
+		Harness routedLive = RunRouted(bars, live0, h => { routedPlan(h); h.ExitUnits = RutaMirrorExitUnits.Dollars; h.FixedContracts = 5; }, live, lb, clock);
+		string[] log = File.ReadAllLines(Path.ChangeExtension(liveCfg, ".log"));
+		List<RutaPropRow> liveRows = live.Rows();
+		int closedTargets = log.Count(l => l.Contains("closed (target)")), closedStops = log.Count(l => l.Contains("closed (stop)"));
+		Check(routedLive.Orders.Count == 0 && liveRows.Sum(r => r.Trades) > 8 && closedTargets > 0 && closedStops > 0,
+			"route (live, simulated broker): " + liveRows.Sum(r => r.Trades) + " trades on 4 accounts, " + closedTargets + " at the target, " + closedStops + " at the stop");
+		Check(log.Where(l => l.Contains("closed (target)")).All(l => l.Contains(": +$750.00 |")), "route (live): every target exit is exactly +$750 (5 MNQ, 75 points from the real fill)");
+		Check(log.Where(l => l.Contains("closed (stop)")).All(l => { int k = l.IndexOf(": -$"); return k > 0 && double.Parse(l.Substring(k + 4, l.IndexOf(' ', k + 4) - k - 4).Replace(",", ""), CultureInfo.InvariantCulture) >= 1500; }),
+			"route (live): every stop exit loses at least $1,500 (more only through slippage past the stop)");
+		Check(Math.Abs(liveRows.Sum(r => r.Pnl) - lb.Realized.Values.Sum()) < 1e-6, "route (live): the manager's P&L per account adds up to the broker's realized P&L ($"
+			+ lb.Realized.Values.Sum().ToString("0", CultureInfo.InvariantCulture) + ")");
+		Check(liveRows.All(r => lb.Pos.ContainsKey(r.Account) == false || lb.Pos[r.Account] == 0 || r.Status == "IN TRADE"), "route (live): no account holds a position the manager doesn't know about");
+		Check(!log.Any(l => l.Contains("!!!") && !l.Contains("is at the max loss line")), "route (live): no errors, rejections or forced flattens in the log");
+		Check(liveRows.Any(r => r.Status == RutaPropRouter.TargetReached || r.Status == RutaPropRouter.MaxLossHit) || liveRows.Sum(r => r.Days) > 8,
+			"route (live): accounts progress through the evaluation (" + string.Join(", ", liveRows.Select(r => r.Account + " " + r.Status + " " + RutaPropRouter.Money(r.Pnl)).ToArray()) + ")");
+
+		// stress: TradingView exits (on the close) + reversals, every signal routed, one account at a time
+		FakeBroker sb = new FakeBroker("A", "B", "C");
+		string stressCfg = Path.Combine(outDir, "route_stress.xml");
+		foreach (string f in new[] { stressCfg, Path.ChangeExtension(stressCfg, ".log") })
+			if (File.Exists(f)) File.Delete(f);
+		RutaPropRouter stress = new RutaPropRouter(sb, stressCfg, false);
+		stress.Clock = () => clock[0];
+		RutaPropSettings ss = stress.GetSettings();
+		ss.DailyGoal = 0; ss.Rotation = RutaPropRotation.UntilDayDone; ss.CustomTarget = 1e9; ss.CustomMaxLoss = 1e9; ss.CustomConsistencyPct = 0; ss.CommissionPerContract = 0;
+		stress.SetSettings(ss);
+		foreach (string acct in new[] { "A", "B", "C" })
+			stress.AddSlot(acct, "Custom");
+		stress.SetMode(RutaPropMode.Live);
+		RutaPropRouter.UseForTesting(stress);
+		Harness st = RunRouted(bars, live0, h => { h.Instrument.MasterInstrument.PointValue = 2; h.ExitUnits = RutaMirrorExitUnits.Dollars; h.FixedContracts = 2;
+			h.StopLossDollars = 500; h.TakeProfitDollars = 1000; h.RouteToPropManager = true; }, stress, sb, clock);
+		string[] slog = File.ReadAllLines(Path.ChangeExtension(stressCfg, ".log"));
+		List<RutaPropRow> srows = stress.Rows();
+		int reversals = slog.Count(l => l.Contains("exit (reversal)"));
+		Check(srows[0].Trades > 10 && srows.Skip(1).All(r => r.Trades == 0) && reversals > 0,
+			"route stress (live, TradingView exits): " + srows[0].Trades + " trades incl. " + reversals + " reversals, all on account A (UntilDayDone, no day limits)");
+		Check(Math.Abs(srows.Sum(r => r.Pnl) - sb.Realized.Values.Sum()) < 1e-6 && slog.Where(l => l.Contains("closed (target)")).All(l => l.Contains(": +$1,000.00 |")),
+			"route stress: booked P&L = broker realized P&L, every target exactly +$1,000");
+		bool open = srows[0].Status == "IN TRADE";
+		int engineLive = st.EngineForTest.Trades.Count(t => t.EntryBar >= live0) + (st.EngineForTest.Position != 0 ? 1 : 0);
+		Check(srows[0].Trades + (open ? 1 : 0) == engineLive && (sb.Pos["A"] == 0 || open && sb.Pos["A"] == st.EngineForTest.Position * 2),
+			"route stress: one account trade per strategy trade; the account is flat or holds the strategy's open position");
+		Check(!slog.Any(l => l.Contains("!!!") || l.Contains("dropped") || l.Contains("skipped")), "route stress: no errors, drops or skips");
+		RutaPropRouter.UseForTesting(null);
 
 		Console.WriteLine(failures == 0 ? "ALL C# CHECKS PASSED" : failures + " C# CHECK(S) FAILED");
 		return failures == 0 ? 0 : 1;

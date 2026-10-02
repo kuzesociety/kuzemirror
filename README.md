@@ -3,6 +3,7 @@
 | File | What it is |
 |---|---|
 | `ninjatrader/Strategies/RutaCryptoMirror.cs` | The NinjaTrader 8 strategy. It trades the Pine logic bar for bar and draws the TradingView-style trades on the chart. |
+| `ninjatrader/AddOns/RutaPropRouter.cs` + `RutaPropManagerWindow.cs` | The **Prop Account Manager** (V7): a window in NinjaTrader (Control Center → New) that sends the strategy's live trades to your prop accounts, one account per trade. See section 7. |
 | `tradingview/rutacrypto_original.pine` | Your Pine v4 script, unchanged, kept for reference. |
 | `tradingview/rutacrypto_debug.pine` | The same script with identical trading logic. It adds hidden Data Window values so you can compare numbers bar by bar with NinjaTrader. |
 | `tools/verify/` | The automated checks used to validate the port (see the end of this file). |
@@ -22,7 +23,15 @@ The martingale and leverage parts are removed. Nothing in the entry or exit logi
 * `RutaCryptoMirrorV3.cs`: frozen. V2 plus the **Use PDH/PDL filter** switch (off = identical to V2).
 * `RutaCryptoMirrorV4.cs`: frozen. V3 plus **PDH/PDL Range Level (%)** (default 50 = middle of the previous session's range; 100 = identical to V3's filter; filter off = identical to V2/V3).
 * `RutaCryptoMirrorV5.cs`: frozen. V4 plus **9. Daily rules & trading hours** (all off = identical to V4).
-* `RutaCryptoMirrorV6.cs`: V5 plus **10. Prop accounts (simulated rotation)** with the accounts dashboard (off = identical to V5).
+* `RutaCryptoMirrorV6.cs`: frozen. V5 plus **10. Prop accounts (simulated rotation)** with the accounts dashboard (off = identical to V5).
+* `RutaCryptoMirrorV7.cs`: V6 plus **11. Prop Account Manager (live)**: the switch that hands live trades to the Prop Account Manager window (off = identical to V6). **V7 needs the two AddOns files**, see below.
+
+**Prop Account Manager (V7): 3 files.**
+1. `RutaCryptoMirrorV7.cs` → `Documents\NinjaTrader 8\bin\Custom\Strategies\`
+2. `RutaPropRouter.cs` and `RutaPropManagerWindow.cs` → `Documents\NinjaTrader 8\bin\Custom\AddOns\`
+3. Compile (**F5** in the NinjaScript Editor). **Control Center → New → Prop Account Manager** opens the window.
+
+Install all three together. V7 uses the manager, so without the two AddOns files NinjaTrader reports a compile error, and a compile error stops every custom script from compiling. V2–V6 don't need them. If you copy the newest `RutaCryptoMirror.cs` instead of V7, it needs the AddOns files too.
 
 **Nothing on the chart?**
 * No status box at the bottom-left: the strategy is not running. Check the **Enabled** box. Then look at **Control Center → Log** for a red line mentioning RutaCryptoMirror.
@@ -262,6 +271,46 @@ Details:
 
 **Not modeled:** commissions and slippage, minimum trading days, payout rules, and rule changes by the firms. The end of the day is the end of the chart's session. Best day uses closed trades.
 
+### Prop Account Manager (V7): live trades on your prop accounts
+
+Group 10 only **simulates** accounts on the chart. The Prop Account Manager is a real NinjaTrader window, **Control Center → New → Prop Account Manager**, and it trades your real accounts. The strategy stops trading its own account: each **live** trade goes to the manager, and the manager:
+
+1. picks **one** of your accounts (rotation `EveryTrade` or `UntilDayDone`, same as group 10);
+2. sends a **market order** to that account (marked as automated);
+3. once it fills, places a **real stop + target (OCO)** at the strategy's $ distances from the **actual fill price**. The trade is protected at the broker even if NinjaTrader closes;
+4. closes the trade at market when the strategy exits for another reason (signal exit, end time, reversal);
+5. books the result and applies the rules per account: daily goal (with tolerance), daily max loss, the firm's max loss line, profit target, consistency and daily loss limit. Plans are the same as group 10.
+
+**It always starts in DRY RUN.** In DRY RUN nothing is sent. The manager runs the rotation and the rules on the strategy's own fills, so you can watch a day or two first. DRY RUN and LIVE keep separate numbers. Every time NinjaTrader starts, it is back in DRY RUN.
+
+**Setup**
+1. Install the 3 files (section 1).
+2. Open the window. Press **+ Add account** once per account, pick the NinjaTrader account (it must be connected) and its plan. Untick **On** to leave an account out.
+3. Account added mid-evaluation? Type its numbers from the firm's dashboard: **Eval P&L** (balance − starting balance), **Best day**, **EOD peak** (highest end-of-day P&L, which the trailing max loss line follows) and **Days**.
+4. Set Rotation, **Daily goal $** (1500), **Tolerance $** (100), **Daily max loss $** (0 = off) and the two "Skip if…" boxes at the top. These replace group 9; the strategy's own daily goal / max loss and group 10 are ignored while it routes. **Trading hours (group 9) still apply** in the strategy: no entries outside the window, and Flatten at End Time closes the open trade through the manager.
+5. Strategy V7 on the chart (MNQ, 5 min): group 11 **Route to Prop Account Manager** = on, and group 1 **Exit Execution = StopTargetOrders**. The manager always uses real stop/target orders, and this setting makes the chart and backtests match them. Enable the strategy. Trades are routed from the **first live bar**, never from history.
+6. Watch it in DRY RUN. When you're happy, press **Go LIVE** and confirm.
+
+**Test on simulated accounts first.** Add NinjaTrader **Sim** accounts (Control Center → Accounts → right-click → Add Simulation Account, e.g. Sim-TS1, Sim-TS2…), give them the plans you use, and run LIVE on them for a few days. With **Market Replay** (Playback connection), add `Playback101` to test LIVE quickly. Then switch the rows to your real accounts.
+
+**Reading the window**
+* Top: mode (**DRY RUN** / **LIVE**), *Go LIVE / Back to DRY RUN*, *Paused* (new signals are skipped; open trades keep their stop/target), **FLATTEN ALL**, and the status line: accounts ready, next account, open trades, current session.
+* Rows: Status `READY`, `IN TRADE`, `DONE TODAY` (goal or loss limit; back to READY at the next session), `TARGET REACHED`, `MAX LOSS HIT`, `CAN'T FIT` (the next trade's full stop would break a daily limit), `NOT CONNECTED`, `OPEN POSITION` (the account holds a position the manager didn't open, so it's skipped until it is flat), `CHECK ACCOUNT` (something needs you: see the note). ► marks the next account. **Max loss line** shows the line and the room left. **To target** includes the consistency rule. **Cash** is the account's cash value from the broker.
+* Buttons: **Ready** clears DONE TODAY / CHECK ACCOUNT, **New eval** zeroes the numbers for a new evaluation, **Remove** deletes the row.
+* The log at the bottom shows every signal, order, fill and decision, and is saved to `Documents\NinjaTrader 8\RutaCryptoMirror\PropAccountManager.log`. Settings and numbers are saved to `PropAccountManager.xml` in the same folder.
+
+**Safety behavior**
+* No account free (all done, in a trade, not connected, can't fit) → the signal is skipped, and the log says why for each account.
+* One trade per account at a time. A reversal first closes the old trade; the new entry follows as soon as the close is booked, and goes to the same account with `UntilDayDone`.
+* Entry not filled in 20 s → cancelled. Stop/target rejected → the position is closed at market. Exit order rejected, or the stop/target not cancelled within 10 s → NinjaTrader **Flatten** on that account; that trade's P&L then comes from the account's cash change (or is estimated and marked in the note).
+* A position that won't close after Flatten → routing **pauses** and the account shows `CHECK ACCOUNT`.
+* **FLATTEN ALL** pauses and closes every trade the manager opened. Press it again to force NinjaTrader's Flatten. Positions you opened yourself are not touched: use NinjaTrader's *Flatten Everything* for those.
+* **Closing the window does not stop the manager.** Open trades stay managed and new signals keep being routed. To stop: *Back to DRY RUN*, *Paused*, or disable the strategy.
+* Don't recompile NinjaScript (F5) while LIVE trades are open. The manager restarts in DRY RUN and loses track of them; their stop/target stay at the broker, and the account shows `CHECK ACCOUNT` until you check it.
+* Check your firms' rules on automated trading before going live.
+
+**Not handled:** commissions are not taken from the broker (set **Commission $/contract**), open trades are not included in the end-of-day peak, and the firm's own dashboard is the final word: use the editable cells to match it.
+
 ## 8. Differences that cannot be removed
 
 * **Fill price.** No real broker can fill at the close of a bar that has already closed. NinjaTrader's real fills come one tick later; TradingView's simulated fill is the close. The drawn markers and the stats box use TradingView's price; NinjaTrader's Strategy Performance uses the real fills.
@@ -334,4 +383,7 @@ On NQ the size barely changes, so the stop ends up wherever the dollars put it. 
 * recomputes the prop account rotation: 4 configurations (the planned setup on Topstep + Lucid accounts rotating every trade; until the day is done with the account-loss block; Topstep with its daily limit, a custom intraday-trailing account and Lucid Pro; on-close exits with a custom static account and Topstep 100K without restarts). On all 6 datasets every trade, the account that took it, and every account event (start, day done, passed, failed with balances) match. With rotation off, 198 output files are identical to V5;
 * recomputes the setup report the same way: all 848 RSI-trigger setups (filters, blocker, outcome, R) and every report row match. A run with the SMA filter switched off matches too. Every real TP/SL trade has the same hindsight outcome as its setup.
 
-This proves the C# follows the Pine script exactly. It does not replace the real side-by-side check in section 3: neither TradingView nor NinjaTrader can run in this environment, so the compile was against stand-ins, not NinjaTrader itself.
+* **Prop Account Manager:** the router (`RutaPropRouter.cs`) is tested against a simulated broker (`FakeBroker.cs`) with market, stop and limit orders, OCO, partial fills, rejections, ignored cancels, failed Flatten, disconnected accounts and foreign positions. 63 checks cover rotation, every firm rule, the live order flow (entry → fill → stop/target at the real fill → exit), the timeouts, FLATTEN ALL, mode switching and save / load. The strategy is then run into it on all 6 datasets: half the bars historical, half live. In DRY RUN, only live-bar trades are routed and each is booked with exactly the strategy's result. LIVE against the simulated broker (187 trades on the planned setup and on a TradingView-exit stress run with reversals): every target books exactly +$750 / +$1,000, the manager's P&L equals the broker's realized P&L to the cent, no account is left with a position the manager doesn't know about, and the log shows no errors. With the switch off, 318 output files are identical to V6;
+* `tools/verify/compilecheck/CompileCheck.csproj` compiles **every** shipped file together (all strategy versions and the add-on), as NinjaTrader does, as C# 5 against the **real WPF reference assemblies** and stand-ins for the NinjaTrader API.
+
+This proves the C# follows the Pine script exactly. It does not replace the real side-by-side check in section 3: neither TradingView nor NinjaTrader can run in this environment, so the compile was against stand-ins, not NinjaTrader itself. The Prop Account Manager window has only been compiled, not run: its first real run is on your machine, in DRY RUN and then on Sim accounts.

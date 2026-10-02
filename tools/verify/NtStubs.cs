@@ -1,6 +1,7 @@
-// Minimal stand-ins for the NinjaTrader 8 / WPF types RutaCryptoMirror.cs uses, with the same
-// signatures as the real API. They let the strategy compile (as C# 5, like NinjaTrader 8) and run
+// Minimal stand-ins for the NinjaTrader 8 types the shipped NinjaScript files use, with the same
+// signatures as the real API. They let the files compile (as C# 5, like NinjaTrader 8) and run
 // on Linux for automated checks. They are NOT shipped to NinjaTrader.
+// WPF itself comes from WpfFakes.cs (Verify.csproj) or the real WPF reference assemblies (CompileCheck.csproj).
 using System;
 using System.Collections.Generic;
 using System.Windows;
@@ -12,32 +13,61 @@ using NinjaTrader.Gui.Tools;
 using NinjaTrader.NinjaScript;
 using NinjaTrader.NinjaScript.DrawingTools;
 
-namespace System.Windows
-{
-	public enum TextAlignment { Left, Right, Center, Justify }
-}
-namespace System.Windows.Input { internal class StubMarker { } }
-namespace System.Windows.Media
-{
-	public class Brush { public string Name; public Brush(string name) { Name = name; } }
-	public static class Brushes
-	{
-		public static readonly Brush Black = new Brush("Black"), White = new Brush("White"), Gray = new Brush("Gray"),
-			Red = new Brush("Red"), LimeGreen = new Brush("LimeGreen"), DodgerBlue = new Brush("DodgerBlue"),
-			Magenta = new Brush("Magenta"), OrangeRed = new Brush("OrangeRed"), Transparent = new Brush("Transparent"), Goldenrod = new Brush("Goldenrod");
-	}
-}
 namespace NinjaTrader.Cbi
 {
 	public enum TimeInForce { Day, Gtc }
 	public enum MarketPosition { Flat, Long, Short }
 	public enum CalculationMode { Currency, Percent, Price, Ticks, Pips }
-	public class MasterInstrument { public double PointValue = 20; public double TickSize = 0.25; }
+	public class MasterInstrument
+	{
+		public double PointValue = 20; public double TickSize = 0.25;
+		public double RoundToTickSize(double price) { return Math.Round(price / TickSize) * TickSize; }
+	}
 	public class Instrument
 	{
 		private readonly MasterInstrument mi = new MasterInstrument();
 		public MasterInstrument MasterInstrument { get { return mi; } }
 		public string FullName { get { return "NQ 12-26"; } }
+	}
+
+	// Account API used by RutaPropNtBroker (compile shape only; the router is tested with a simulated broker)
+	public enum OrderAction { Buy, BuyToCover, Sell, SellShort }
+	public enum OrderType { Limit, Market, MIT, StopLimit, StopMarket }
+	public enum OrderEntry { Automated, Manual }
+	public enum OrderState { Accepted, CancelPending, CancelSubmitted, Cancelled, ChangePending, ChangeSubmitted, Filled, Initialized, PartFilled, Rejected, Submitted, TriggerPending, Unknown, Working }
+	public enum AccountItem { CashValue, NetLiquidation, RealizedProfitLoss, UnrealizedProfitLoss }
+	public enum Currency { UsDollar }
+	public class CustomOrder { }
+	public class Order
+	{
+		public OrderState OrderState { get; set; }
+		public int Filled { get; set; }
+		public double AverageFillPrice { get; set; }
+		public int Quantity { get; set; }
+		public string Name { get; set; }
+	}
+	public class Position
+	{
+		public Instrument Instrument { get; set; }
+		public MarketPosition MarketPosition { get; set; }
+		public int Quantity { get; set; }
+	}
+	public class PositionCollection : List<Position> { }
+	public class Account
+	{
+		public static readonly System.Collections.ObjectModel.ObservableCollection<Account> All = new System.Collections.ObjectModel.ObservableCollection<Account>();
+		private readonly PositionCollection positions = new PositionCollection();
+		public string Name { get; set; }
+		public PositionCollection Positions { get { return positions; } }
+		public double CashValueForTest = 50000;
+		public readonly List<Order> Submitted = new List<Order>();
+		public double Get(AccountItem itemType, Currency currency) { return itemType == AccountItem.CashValue ? CashValueForTest : 0; }
+		public Order CreateOrder(Instrument instrument, OrderAction action, OrderType orderType, OrderEntry orderEntry, TimeInForce timeInForce, int quantity,
+			double limitPrice, double stopPrice, string oco, string name, DateTime gtd, CustomOrder customOrder)
+		{ Order o = new Order(); o.Quantity = quantity; o.Name = name; o.OrderState = OrderState.Initialized; return o; }
+		public void Submit(IEnumerable<Order> orders) { Submitted.AddRange(orders); }
+		public void Cancel(IEnumerable<Order> orders) { foreach (Order o in orders) o.OrderState = OrderState.Cancelled; }
+		public void Flatten(ICollection<Instrument> instruments) { positions.Clear(); }
 	}
 }
 namespace NinjaTrader.Gui
@@ -77,7 +107,11 @@ namespace NinjaTrader.Data
 }
 namespace NinjaTrader.Core
 {
-	public static class Globals { public static string UserDataDir { get { return System.IO.Path.GetTempPath(); } } }
+	public static class Globals
+	{
+		public static string UserDataDir { get { return System.IO.Path.GetTempPath(); } }
+		public static readonly DateTime MaxDate = new DateTime(2099, 12, 1);
+	}
 }
 namespace NinjaTrader.Core.FloatingPoint { internal class StubMarker { } }
 namespace NinjaTrader.NinjaScript.Indicators { internal class StubMarker { } }
@@ -210,7 +244,7 @@ namespace NinjaTrader.NinjaScript.DrawingTools
 
 		public static Text Text(NinjaScriptBase owner, string tag, bool isAutoScale, string text, DateTime time, double y, int yPixelOffset,
 			Brush textBrush, SimpleFont font, TextAlignment alignment, Brush outlineBrush, Brush areaBrush, int areaOpacity)
-		{ DrawingLog.Calls.Add("TextAt " + tag + " " + text + " " + textBrush.Name); return null; }
+		{ DrawingLog.Calls.Add("TextAt " + tag + " " + text + " " + StubBrush.NameOf(textBrush)); return null; }
 
 		public static TextFixed TextFixed(NinjaScriptBase owner, string tag, string text, TextPosition textPosition, Brush textBrush,
 			SimpleFont font, Brush outlineBrush, Brush areaBrush, int areaOpacity)
