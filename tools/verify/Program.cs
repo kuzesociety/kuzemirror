@@ -332,8 +332,11 @@ public static class Program
 		// ---- PDH/PDL filter on (TradingView exits otherwise) ----
 		Harness pd = RunCustom(bars, h => { h.UsePdhPdlFilter = true; }, outDir, "pd");
 		Check(pd.EngineForTest.Trades.Count > 5, "PDH/PDL filter: still trades (" + pd.EngineForTest.Trades.Count + " vs " + trades.Count + " without)");
-		Check(pd.EngineForTest.Candidates.Any(x => !x.Taken && (x.Blockers == "PDH" || x.Blockers == "PDL")), "PDH/PDL filter: skipped setups name PDH / PDL as the blocker");
-		Check(pd.EngineForTest.StatsText(200).Contains("PDH/PDL filter ON - longs above PDH"), "PDH/PDL filter: stats box shows the current levels");
+		Check(pd.EngineForTest.Candidates.Any(x => !x.Taken && x.Blockers == "PD50%"), "PD filter at 50%: skipped setups name PD50% as the blocker");
+		Check(pd.EngineForTest.StatsText(200).Contains("PDH/PDL filter ON at 50% of the range - longs above"), "PD filter: stats box shows the current levels");
+		Harness pd100 = RunCustom(bars, h => { h.UsePdhPdlFilter = true; h.PdLevelPercent = 100; }, outDir, "pd100");
+		Check(pd100.EngineForTest.Candidates.Any(x => !x.Taken && (x.Blockers == "PDH" || x.Blockers == "PDL")), "PD filter at 100%: skipped setups name PDH / PDL as the blocker");
+		Check(pd.EngineForTest.Trades.Count > pd100.EngineForTest.Trades.Count, "PD filter: 50% allows more trades than 100% (" + pd.EngineForTest.Trades.Count + " vs " + pd100.EngineForTest.Trades.Count + ")");
 		Check(!a.EngineForTest.StatsText(200).Contains("PDH/PDL"), "PDH/PDL filter off: no PDH/PDL line in the stats box");
 
 		Console.WriteLine(failures == 0 ? "ALL C# CHECKS PASSED" : failures + " C# CHECK(S) FAILED");

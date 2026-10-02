@@ -19,7 +19,8 @@ The martingale and leverage parts are removed. Nothing in the entry or exit logi
 
 **Side-by-side copies:** each version installs next to the others under its own name, because every name inside is changed (strategy, dropdown types, drawing tags, CSV folder). They are generated with `tools/make_variant.sh <suffix>`. Settings templates are saved per strategy name, so re-enter your values in each one.
 * `RutaCryptoMirrorV2.cs`: frozen snapshot with the dollar exits and ATR sizing. Don't regenerate it.
-* `RutaCryptoMirrorV3.cs`: V2 plus the **Use PDH/PDL filter** switch (off = identical to V2).
+* `RutaCryptoMirrorV3.cs`: frozen. V2 plus the **Use PDH/PDL filter** switch (off = identical to V2).
+* `RutaCryptoMirrorV4.cs`: V3 plus **PDH/PDL Range Level (%)** (default 50 = middle of the previous session's range; 100 = identical to V3's filter; filter off = identical to V2/V3).
 
 **Nothing on the chart?**
 * No status box at the bottom-left: the strategy is not running. Check the **Enabled** box. Then look at **Control Center → Log** for a red line mentioning RutaCryptoMirror.
@@ -49,7 +50,7 @@ Chart setup for a fair comparison:
 | `atr(14)`, `sma(close, 10)` (hard-coded) | ATR Length / Trend SMA Length | 14 / 10 |
 | Lookback Candles = 7 | *(not ported: the Pine code never uses it)* | |
 | *(new, not in Pine)* | Stop/Target Units (AtrMultiple / Dollars / DollarsSizedByAtr), Stop Loss ($), Take Profit ($), Exit Execution | AtrMultiple, 1000, 1000, OnBarClose = TradingView. See section 9. |
-| *(new, not in Pine)* | Use PDH/PDL filter (group 8) | off = TradingView. On: longs only when the close is above the previous session's high, shorts only below its low. |
+| *(new, not in Pine)* | Use PDH/PDL filter, PDH/PDL Range Level (%) (group 8) | off = TradingView. On: longs only when the close is above the chosen level of the previous session's range, shorts only below it. |
 
 **Check the Volume MA length.** The RSI source is the *Volume MA line of TradingView's Volume indicator*. The `Vol. 10` in the volume pane suggests MA length 10. Open that indicator's settings and put the same length in `Volume MA Length`. If the source dropdown actually says `Vol.: Volume` and not `Volume MA`, set RSI Source = `Volume`.
 
@@ -186,11 +187,20 @@ Important:
 
 ### PDH / PDL filter
 
-**Use PDH/PDL filter** (group *8. Filter switches*, off by default) adds one more condition to the entry: a long needs the signal bar's **close above the previous session's high**, a short needs it **below the previous session's low**. Everything else is unchanged; with the switch off, every trade is identical.
+**Use PDH/PDL filter** (group *8. Filter switches*, off by default) adds one more condition to the entry, based on where the signal bar's close sits in the **previous session's range**. **PDH/PDL Range Level (%)** sets the line:
+
+| Level | Longs need the close above | Shorts need the close below |
+|---|---|---|
+| 100 | PDH (a breakout, as in V3) | PDL |
+| **50** (default) | the middle of the range | the middle of the range |
+| 25 | a quarter of the way up from PDL | a quarter of the way down from PDH |
+| 0 | PDL | PDH |
+
+In general: long line = PDL + level × (PDH − PDL), short line = PDH − level × (PDH − PDL). Everything else is unchanged; with the switch off, every trade is identical. The level can be optimized in the Strategy Analyzer (e.g. 25 → 100, step 25).
 
 * Sessions come from the chart's **Trading Hours** template. With *CME US Index Futures ETH*, one session runs 6 pm to 5 pm New York time, so the levels include the overnight. Sunday evening's previous session is Friday's.
 * The first, partial session on the chart is never used. Until one full session has been seen, the filter allows no trades.
-* While it is on, the chart shows the levels as gold lines. The stats box shows the current PDH / PDL. Skipped setups show `PDH` / `PDL` as the blocker, and the setup report has a *Blocked ONLY by PDH/PDL* row.
+* While it is on, the chart shows PDH / PDL as gold lines and the long / short lines as dashed green / red (at 50 they sit on top of each other). The stats box shows the current values. Skipped setups name the blocker (`PDH` / `PDL` at level 100, otherwise e.g. `PD50%`), and the setup report has a *Blocked ONLY by PD range level* row.
 
 ## 8. Differences that cannot be removed
 
@@ -259,7 +269,7 @@ On NQ the size barely changes, so the stop ends up wherever the dollars put it. 
 * runs it on 6 synthetic 5-minute datasets and checks that every TradingView fill produces exactly one NinjaTrader order on the same bar, and that `Calculate = OnEachTick` gives the same trades as `OnBarClose`;
 * recomputes everything with an independent Python version of the Pine script. Result: **0 mismatches over 36,000 bars and 295 trades**, on every indicator value, both conditions, the position, and every entry and exit time, price and reason.
 * recomputes the dollar-exit modes ($500 stop / $1000 target, both on-close and with stop/target orders) and the ATR-sized mode (MNQ, $1000 / $1500, capped at 12): same trades, contract counts, setups and report rows;
-* recomputes the PDH/PDL levels and a run with the filter on: same levels on every bar, same trades, setups and report rows. With the filter off, 84 output files (trades in every exit mode, per-bar values, setups, report rows) are identical to the version before the filter was added;
+* recomputes the PDH/PDL levels and the long / short lines, and runs with the filter on at levels 50 and 100: same values on every bar, same trades, setups and report rows. With the filter off, 84 output files (trades in every exit mode, per-bar values, setups, report rows) are identical to the version before the filter was added. At level 100, the trades, setups and report rows are identical to V3's filter;
 * recomputes the setup report the same way: all 848 RSI-trigger setups (filters, blocker, outcome, R) and every report row match. A run with the SMA filter switched off matches too. Every real TP/SL trade has the same hindsight outcome as its setup.
 
 This proves the C# follows the Pine script exactly. It does not replace the real side-by-side check in section 3: neither TradingView nor NinjaTrader can run in this environment, so the compile was against stand-ins, not NinjaTrader itself.

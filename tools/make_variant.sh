@@ -2,7 +2,7 @@
 # Usage: tools/make_variant.sh V3
 # Writes ninjatrader/Strategies/RutaCryptoMirror<SUFFIX>.cs: the current strategy with every global name renamed
 # (class, display name, enums, CSV folder, drawing tags) so it installs next to RutaCryptoMirror.cs and other variants.
-# RutaCryptoMirrorV2.cs is a frozen snapshot (made before the PDH/PDL filter); don't regenerate it.
+# Frozen snapshots, do not regenerate: V2 (before the PDH/PDL filter), V3 (PDH/PDL filter without the range level).
 set -euo pipefail
 suffix="${1:?usage: make_variant.sh V3}"
 root="$(cd "$(dirname "$0")/.." && pwd)"

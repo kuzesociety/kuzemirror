@@ -118,7 +118,7 @@ def intrabar(d, stop, target, o, h, l):
     return 0, None
 
 
-def run(bars, use_ha=True, use_vol=True, use_sma=True, use_pd=False, units='atr', execution='close',
+def run(bars, use_ha=True, use_vol=True, use_sma=True, use_pd=False, pd_level=100.0, units='atr', execution='close',
         sl_usd=1000.0, tp_usd=1000.0, qty=1, pv=20.0, tick=0.25, max_qty=10):
     o = [b['open'] for b in bars]
     h = [b['high'] for b in bars]
@@ -160,7 +160,10 @@ def run(bars, use_ha=True, use_vol=True, use_sma=True, use_pd=False, units='atr'
             cur_hi = h[i] if na(cur_hi) else max(cur_hi, h[i])
             cur_lo = l[i] if na(cur_lo) else min(cur_lo, l[i])
         pdh[i], pdl[i] = ph, pl
-    pd_ok = {1: [not use_pd or gt(c[i], pdh[i]) for i in range(n)], -1: [not use_pd or lt(c[i], pdl[i]) for i in range(n)]}
+    # range level: longs above PDL + level x range, shorts below PDH - level x range (100 = PDH / PDL)
+    pd_long = [NA if na(pdh[i]) else pdl[i] + pd_level / 100.0 * (pdh[i] - pdl[i]) for i in range(n)]
+    pd_short = [NA if na(pdh[i]) else pdh[i] - pd_level / 100.0 * (pdh[i] - pdl[i]) for i in range(n)]
+    pd_ok = {1: [not use_pd or gt(c[i], pd_long[i]) for i in range(n)], -1: [not use_pd or lt(c[i], pd_short[i]) for i in range(n)]}
 
     longcond = [ha_ok[1][i] and trig[1][i] and vol_ok[i] and sma_ok[1][i] and pd_ok[1][i] for i in range(n)]
     shortcond = [ha_ok[-1][i] and trig[-1][i] and vol_ok[i] and sma_ok[-1][i] and pd_ok[-1][i] for i in range(n)]
@@ -258,7 +261,10 @@ def run(bars, use_ha=True, use_vol=True, use_sma=True, use_pd=False, units='atr'
                 if h_ok: groups.add(2)
                 if h_ok and v_ok: groups.add(3)
                 if h_ok and v_ok and s_ok and pdk: groups.add(4)
-                pd_name = 'PDH' if d > 0 else 'PDL'
+                if pd_level == 100:
+                    pd_name = 'PDH' if d > 0 else 'PDL'
+                else:
+                    pd_name = 'PD' + ('%.2f' % pd_level).rstrip('0').rstrip('.') + '%'
                 failed = [name for name, ok in (('HA', h_ok), ('VOL', v_ok), ('SMA', s_ok), (pd_name, pdk)) if not ok]
                 if len(failed) == 1:
                     groups.add({'HA': 5, 'VOL': 6, 'SMA': 7, pd_name: 8}[failed[0]])
@@ -279,6 +285,7 @@ def run(bars, use_ha=True, use_vol=True, use_sma=True, use_pd=False, units='atr'
 
     return dict(ho=ho, hc=hc, src=src, rsi=r, osc=osc, atr=a, trend=trend,
                 longcond=longcond, shortcond=shortcond, pos=pos_before, trades=trades, pdh=pdh, pdl=pdl,
+                pd_long=pd_long, pd_short=pd_short,
                 setups=setups, buckets=buckets)
 
 
@@ -324,11 +331,12 @@ def main(d):
     for b, r in zip(bars, raw):
         b['new_session'] = r.get('new_session') == '1'
     times = [r['time'][:16] for r in raw]
-    ref = run(bars)
+    ref = run(bars, pd_level=50.0)     # the strategy's default level (filter off)
 
     nt = read_csv(d + '/nt_bars.csv')
     cols = [('ha_open', 'ho'), ('ha_close', 'hc'), ('rsi_source', 'src'), ('rsi', 'rsi'),
-            ('vol_osc', 'osc'), ('atr', 'atr'), ('sma_trend', 'trend'), ('pdh', 'pdh'), ('pdl', 'pdl')]
+            ('vol_osc', 'osc'), ('atr', 'atr'), ('sma_trend', 'trend'), ('pdh', 'pdh'), ('pdl', 'pdl'),
+            ('pd_long_level', 'pd_long'), ('pd_short_level', 'pd_short')]
     bad = 0
     worst = {}
     for i, row in enumerate(nt):
@@ -399,7 +407,8 @@ def main(d):
     for suffix, kw in (('usd_close', dict(units='usd', sl_usd=500.0, tp_usd=1000.0)),
                        ('usd_orders', dict(units='usd', sl_usd=500.0, tp_usd=1000.0, execution='orders')),
                        ('usd_atr', dict(units='usd_atr', sl_usd=1000.0, tp_usd=1500.0, execution='orders', pv=2.0, max_qty=12)),
-                       ('pd', dict(use_pd=True))):
+                       ('pd', dict(use_pd=True, pd_level=50.0)),
+                       ('pd100', dict(use_pd=True, pd_level=100.0))):
         refm = run(bars, **kw)
         t_ok = load_trades(d + '/nt_trades_%s.csv' % suffix) == ref_trade_rows(refm, times)
         s_ok = load_setups(d + '/nt_setups_%s.csv' % suffix) == ref_setup_rows(refm, times)
