@@ -24,7 +24,7 @@ namespace System.Windows.Media
 	{
 		public static readonly Brush Black = new Brush("Black"), White = new Brush("White"), Gray = new Brush("Gray"),
 			Red = new Brush("Red"), LimeGreen = new Brush("LimeGreen"), DodgerBlue = new Brush("DodgerBlue"),
-			Magenta = new Brush("Magenta"), OrangeRed = new Brush("OrangeRed"), Transparent = new Brush("Transparent");
+			Magenta = new Brush("Magenta"), OrangeRed = new Brush("OrangeRed"), Transparent = new Brush("Transparent"), Goldenrod = new Brush("Goldenrod");
 	}
 }
 namespace NinjaTrader.Cbi
@@ -65,7 +65,13 @@ namespace NinjaTrader.Data
 {
 	public enum BarsPeriodType { Tick, Volume, Range, Second, Minute, Day, Week, Month, Year }
 	public class BarsPeriod { public BarsPeriodType BarsPeriodType { get; set; } public int Value { get; set; } }
-	public class Bars { public bool IsTickReplay { get; set; } public int Count { get; set; } }
+	public class Bars
+	{
+		public bool IsTickReplay { get; set; }
+		public int Count { get; set; }
+		public readonly System.Collections.Generic.HashSet<int> SessionStarts = new System.Collections.Generic.HashSet<int>();
+		public bool IsFirstBarOfSessionByIndex(int index) { return SessionStarts.Contains(index); }
+	}
 }
 namespace NinjaTrader.Core
 {

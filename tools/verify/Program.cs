@@ -66,8 +66,13 @@ public static class Program
 		return h;
 	}
 
+	// A new trading session starts at 18:00 (first 5-minute bar is stamped 18:05), like CME ETH
+	private static bool IsSessionStart(BarData b) { return b.T.Hour == 18 && b.T.Minute == 5; }
+
 	private static void Push(Harness h, BarData b)
 	{
+		if (IsSessionStart(b))
+			h.Bars.SessionStarts.Add(h.TimeData.Count);
 		h.TimeData.Add(b.T); h.OpenData.Add(b.O); h.HighData.Add(b.H); h.LowData.Add(b.L); h.CloseData.Add(b.C); h.VolumeData.Add(b.V);
 	}
 
@@ -139,9 +144,9 @@ public static class Program
 		List<BarData> bars = MakeBars(n, seed);
 
 		// write raw bars for the Python reference
-		StringBuilder raw = new StringBuilder("time,open,high,low,close,volume\n");
+		StringBuilder raw = new StringBuilder("time,open,high,low,close,volume,new_session\n");
 		foreach (BarData b in bars)
-			raw.AppendLine(string.Format(CultureInfo.InvariantCulture, "{0:yyyy-MM-dd HH:mm:ss},{1},{2},{3},{4},{5}", b.T, b.O, b.H, b.L, b.C, b.V));
+			raw.AppendLine(string.Format(CultureInfo.InvariantCulture, "{0:yyyy-MM-dd HH:mm:ss},{1},{2},{3},{4},{5},{6}", b.T, b.O, b.H, b.L, b.C, b.V, IsSessionStart(b) ? 1 : 0));
 		File.WriteAllText(Path.Combine(outDir, "bars_input.csv"), raw.ToString());
 
 		// ---- Run 1: historical, OnBarClose ----
@@ -323,6 +328,13 @@ public static class Program
 			"ATR sizing: NinjaTrader entry orders carry the sized quantity");
 		string sizeLine = usdAtr.Printed.FirstOrDefault(p => p.Contains("Contracts per entry")) ?? "";
 		Check(sizeLine.Length > 0, "setup report prints the contracts-per-entry line: " + sizeLine.Trim());
+
+		// ---- PDH/PDL filter on (TradingView exits otherwise) ----
+		Harness pd = RunCustom(bars, h => { h.UsePdhPdlFilter = true; }, outDir, "pd");
+		Check(pd.EngineForTest.Trades.Count > 5, "PDH/PDL filter: still trades (" + pd.EngineForTest.Trades.Count + " vs " + trades.Count + " without)");
+		Check(pd.EngineForTest.Candidates.Any(x => !x.Taken && (x.Blockers == "PDH" || x.Blockers == "PDL")), "PDH/PDL filter: skipped setups name PDH / PDL as the blocker");
+		Check(pd.EngineForTest.StatsText(200).Contains("PDH/PDL filter ON - longs above PDH"), "PDH/PDL filter: stats box shows the current levels");
+		Check(!a.EngineForTest.StatsText(200).Contains("PDH/PDL"), "PDH/PDL filter off: no PDH/PDL line in the stats box");
 
 		Console.WriteLine(failures == 0 ? "ALL C# CHECKS PASSED" : failures + " C# CHECK(S) FAILED");
 		return failures == 0 ? 0 : 1;

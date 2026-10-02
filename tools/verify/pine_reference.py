@@ -118,7 +118,7 @@ def intrabar(d, stop, target, o, h, l):
     return 0, None
 
 
-def run(bars, use_ha=True, use_vol=True, use_sma=True, units='atr', execution='close',
+def run(bars, use_ha=True, use_vol=True, use_sma=True, use_pd=False, units='atr', execution='close',
         sl_usd=1000.0, tp_usd=1000.0, qty=1, pv=20.0, tick=0.25, max_qty=10):
     o = [b['open'] for b in bars]
     h = [b['high'] for b in bars]
@@ -145,8 +145,25 @@ def run(bars, use_ha=True, use_vol=True, use_sma=True, units='atr', execution='c
     vol_ok = [not use_vol or gt(osc[i], P['vollevel']) for i in range(n)]
     sma_ok = {1: [not use_sma or gt(c[i], trend[i]) for i in range(n)], -1: [not use_sma or lt(c[i], trend[i]) for i in range(n)]}
     trig = {1: [crossover(r, P['rsilower'], i) for i in range(n)], -1: [crossunder(r, P['rsiupper'], i) for i in range(n)]}
-    longcond = [ha_ok[1][i] and trig[1][i] and vol_ok[i] and sma_ok[1][i] for i in range(n)]
-    shortcond = [ha_ok[-1][i] and trig[-1][i] and vol_ok[i] and sma_ok[-1][i] for i in range(n)]
+    # previous session high / low; a session counts only if it began at a session start
+    new_session = [b.get('new_session', False) for b in bars]
+    pdh, pdl = [NA] * n, [NA] * n
+    cur_hi = cur_lo = ph = pl = NA
+    complete = False
+    for i in range(n):
+        if new_session[i]:
+            if complete:
+                ph, pl = cur_hi, cur_lo
+            complete = True
+            cur_hi, cur_lo = h[i], l[i]
+        else:
+            cur_hi = h[i] if na(cur_hi) else max(cur_hi, h[i])
+            cur_lo = l[i] if na(cur_lo) else min(cur_lo, l[i])
+        pdh[i], pdl[i] = ph, pl
+    pd_ok = {1: [not use_pd or gt(c[i], pdh[i]) for i in range(n)], -1: [not use_pd or lt(c[i], pdl[i]) for i in range(n)]}
+
+    longcond = [ha_ok[1][i] and trig[1][i] and vol_ok[i] and sma_ok[1][i] and pd_ok[1][i] for i in range(n)]
+    shortcond = [ha_ok[-1][i] and trig[-1][i] and vol_ok[i] and sma_ok[-1][i] and pd_ok[-1][i] for i in range(n)]
 
     def contracts(i):
         if units != 'usd_atr':
@@ -214,7 +231,7 @@ def run(bars, use_ha=True, use_vol=True, use_sma=True, units='atr', execution='c
                     position = 0
 
     # --- setup report: every bar/side followed forward with the SL/TP-on-close rule ---
-    buckets = {(b, sd): [0, 0, 0, 0.0] for b in range(9) for sd in ('long', 'short')}
+    buckets = {(b, sd): [0, 0, 0, 0.0] for b in range(10) for sd in ('long', 'short')}
     setups = []
     for i in range(WARMUP, n):
         if na(a[i]) or not a[i] > 0:
@@ -233,22 +250,23 @@ def run(bars, use_ha=True, use_vol=True, use_sma=True, units='atr', execution='c
                 if res:
                     outcome, res_bar, fill = res, j, f
                     break
-            h_ok, v_ok, s_ok = ha_ok[d][i], vol_ok[i], sma_ok[d][i]
+            h_ok, v_ok, s_ok, pdk = ha_ok[d][i], vol_ok[i], sma_ok[d][i], pd_ok[d][i]
             p_ok = pos_before[i] <= 0 if d > 0 else pos_before[i] >= 0
             groups = {0}
             if trig[d][i]:
                 groups.add(1)
                 if h_ok: groups.add(2)
                 if h_ok and v_ok: groups.add(3)
-                if h_ok and v_ok and s_ok: groups.add(4)
-                failed = [name for name, ok in (('HA', h_ok), ('VOL', v_ok), ('SMA', s_ok)) if not ok]
+                if h_ok and v_ok and s_ok and pdk: groups.add(4)
+                pd_name = 'PDH' if d > 0 else 'PDL'
+                failed = [name for name, ok in (('HA', h_ok), ('VOL', v_ok), ('SMA', s_ok), (pd_name, pdk)) if not ok]
                 if len(failed) == 1:
-                    groups.add({'HA': 5, 'VOL': 6, 'SMA': 7}[failed[0]])
+                    groups.add({'HA': 5, 'VOL': 6, 'SMA': 7, pd_name: 8}[failed[0]])
                 if not failed and not p_ok:
-                    groups.add(8)
+                    groups.add(9)
                 blockers = ' '.join(failed) if failed else ('' if p_ok else 'in position')
                 rr = (fill - entry) * d / risk if res_bar is not None else None
-                setups.append((i, 'long' if d > 0 else 'short', int(h_ok), int(v_ok), int(s_ok), int(p_ok),
+                setups.append((i, 'long' if d > 0 else 'short', int(h_ok), int(v_ok), int(s_ok), int(pdk), int(p_ok),
                                int(entry_dir[i] == d), blockers, {1: 'win', -1: 'loss', 0: 'open'}[outcome], res_bar,
                                None if rr is None else round(rr, 2)))
             if res_bar is not None:
@@ -260,7 +278,7 @@ def run(bars, use_ha=True, use_vol=True, use_sma=True, units='atr', execution='c
                     k[3] += rr
 
     return dict(ho=ho, hc=hc, src=src, rsi=r, osc=osc, atr=a, trend=trend,
-                longcond=longcond, shortcond=shortcond, pos=pos_before, trades=trades,
+                longcond=longcond, shortcond=shortcond, pos=pos_before, trades=trades, pdh=pdh, pdl=pdl,
                 setups=setups, buckets=buckets)
 
 
@@ -281,9 +299,14 @@ def ref_trade_rows(ref, times):
 
 
 def load_setups(path):
-    return [(r['nt_bar_time'], r['side'], int(r['ha_ok']), int(r['vol_ok']), int(r['sma_ok']), int(r['pos_ok']),
+    return [(r['nt_bar_time'], r['side'], int(r['ha_ok']), int(r['vol_ok']), int(r['sma_ok']), int(r['pd_ok']), int(r['pos_ok']),
              int(r['taken']), r['blocked_by'], r['outcome'], r['resolved_nt_time'],
              None if r['r_multiple'] == '' else float(r['r_multiple'])) for r in read_csv(path)]
+
+
+def ref_setup_rows(ref, times):
+    return [(times[i], sd, h_, v_, s_, pd_, p_, t_, bl, oc, '' if rb is None else times[rb], rr)
+            for (i, sd, h_, v_, s_, pd_, p_, t_, bl, oc, rb, rr) in ref['setups']]
 
 
 def buckets_match(path, ref_buckets):
@@ -298,12 +321,14 @@ def buckets_match(path, ref_buckets):
 def main(d):
     raw = read_csv(d + '/bars_input.csv')
     bars = [{k: float(r[k]) for k in ('open', 'high', 'low', 'close', 'volume')} for r in raw]
+    for b, r in zip(bars, raw):
+        b['new_session'] = r.get('new_session') == '1'
     times = [r['time'][:16] for r in raw]
     ref = run(bars)
 
     nt = read_csv(d + '/nt_bars.csv')
     cols = [('ha_open', 'ho'), ('ha_close', 'hc'), ('rsi_source', 'src'), ('rsi', 'rsi'),
-            ('vol_osc', 'osc'), ('atr', 'atr'), ('sma_trend', 'trend')]
+            ('vol_osc', 'osc'), ('atr', 'atr'), ('sma_trend', 'trend'), ('pdh', 'pdh'), ('pdl', 'pdl')]
     bad = 0
     worst = {}
     for i, row in enumerate(nt):
@@ -353,12 +378,8 @@ def main(d):
                     for key, v in ref['buckets'].items())
     print('setup report buckets identical: %s (baseline long n=%d)' % (bucket_ok, ref['buckets'][(0, 'long')][0]))
 
-    nts = read_csv(d + '/nt_setups.csv')
-    nt_setups = [(r['nt_bar_time'], r['side'], int(r['ha_ok']), int(r['vol_ok']), int(r['sma_ok']), int(r['pos_ok']),
-                  int(r['taken']), r['blocked_by'], r['outcome'], r['resolved_nt_time'],
-                  None if r['r_multiple'] == '' else float(r['r_multiple'])) for r in nts]
-    ref_setups = [(times[i], sd, h_, v_, s_, p_, t_, bl, oc, '' if rb is None else times[rb], rr)
-                  for (i, sd, h_, v_, s_, p_, t_, bl, oc, rb, rr) in ref['setups']]
+    nt_setups = load_setups(d + '/nt_setups.csv')
+    ref_setups = ref_setup_rows(ref, times)
     setups_ok = nt_setups == ref_setups
     print('skipped/taken RSI setups: C# %d, Python %d, identical: %s' % (len(nt_setups), len(ref_setups), setups_ok))
     if not setups_ok:
@@ -377,11 +398,11 @@ def main(d):
     modes_ok = True
     for suffix, kw in (('usd_close', dict(units='usd', sl_usd=500.0, tp_usd=1000.0)),
                        ('usd_orders', dict(units='usd', sl_usd=500.0, tp_usd=1000.0, execution='orders')),
-                       ('usd_atr', dict(units='usd_atr', sl_usd=1000.0, tp_usd=1500.0, execution='orders', pv=2.0, max_qty=12))):
+                       ('usd_atr', dict(units='usd_atr', sl_usd=1000.0, tp_usd=1500.0, execution='orders', pv=2.0, max_qty=12)),
+                       ('pd', dict(use_pd=True))):
         refm = run(bars, **kw)
         t_ok = load_trades(d + '/nt_trades_%s.csv' % suffix) == ref_trade_rows(refm, times)
-        s_ok = load_setups(d + '/nt_setups_%s.csv' % suffix) == [(times[i], sd, h_, v_, s_, p_, t_, bl, oc, '' if rb is None else times[rb], rr)
-                                                                   for (i, sd, h_, v_, s_, p_, t_, bl, oc, rb, rr) in refm['setups']]
+        s_ok = load_setups(d + '/nt_setups_%s.csv' % suffix) == ref_setup_rows(refm, times)
         b_ok = buckets_match(d + '/nt_buckets_%s.csv' % suffix, refm['buckets'])
         print('%s: %d trades; trades identical %s, setups identical %s, report identical %s' % (suffix, len(refm['trades']), t_ok, s_ok, b_ok))
         modes_ok = modes_ok and t_ok and s_ok and b_ok
