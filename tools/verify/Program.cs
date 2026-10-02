@@ -126,6 +126,9 @@ public static class Program
 		File.Copy(Path.Combine(csvDir, "NQ_12-26_5Minute_trades.csv"), Path.Combine(outDir, "nt_trades_" + suffix + ".csv"), true);
 		File.Copy(Path.Combine(csvDir, "NQ_12-26_5Minute_setups.csv"), Path.Combine(outDir, "nt_setups_" + suffix + ".csv"), true);
 		File.WriteAllLines(Path.Combine(outDir, "nt_buckets_" + suffix + ".csv"), h.EngineForTest.BucketRows().ToArray());
+		string acc = Path.Combine(csvDir, "NQ_12-26_5Minute_accounts.csv");
+		if (h.UseAccountRotation && File.Exists(acc))
+			File.Copy(acc, Path.Combine(outDir, "nt_accounts_" + suffix + ".csv"), true);
 		return h;
 	}
 
@@ -378,6 +381,37 @@ public static class Program
 		Harness hr = RunCustom(bars, h => { h.UseTradingHours = true; h.TradeStartTime = new DateTime(2000, 1, 1, 9, 30, 0); h.TradeEndTime = new DateTime(2000, 1, 1, 16, 0, 0); h.FlattenAtEndTime = false; }, outDir, "hours_rth");
 		Check(hr.EngineForTest.Trades.All(t => t.EntryTime.TimeOfDay >= rs && t.EntryTime.TimeOfDay < re), "hours 09:30-16:00: every entry inside the window");
 		Check(!hr.EngineForTest.Trades.Any(t => t.ExitSignal == "End time"), "hours without flatten: no End time exits");
+
+		// ---- Prop account rotation (simulated) ----
+		Action<Harness> plan = h => { h.Instrument.MasterInstrument.PointValue = 2; h.ExitUnits = RutaMirrorExitUnits.DollarsSizedByAtr;
+			h.StopLossDollars = 1500; h.TakeProfitDollars = 750; h.MaxContracts = 40; h.ExitExecution = RutaMirrorExitExecution.StopTargetOrders;
+			h.UsePdhPdlFilter = true; h.PdLevelPercent = 50; h.DailyProfitGoal = 1500; h.DailyGoalTolerance = 100; h.DailyMaxLoss = 2000;
+			h.UseAccountRotation = true; h.PropAccountList = "TS-1=Topstep50K, TS-2=Topstep50K, LU-1=LucidFlex50K, LU-2=LucidPro50K"; };
+		Harness rotEvery = RunCustom(bars, h => { plan(h); h.RotationMode = RutaMirrorRotationMode.EveryTrade; }, outDir, "rot_every");
+		Harness rotDay = RunCustom(bars, h => { plan(h); h.RotationMode = RutaMirrorRotationMode.UntilDayDone; h.BlockTradesOverAccountMaxLoss = true; }, outDir, "rot_day");
+		Harness rotDll = RunCustom(bars, h => { plan(h); h.PropAccountList = "A=Topstep50K-DLL; B=Custom; C=LucidPro50K"; h.CustomProfitTarget = 3000; h.CustomMaxLoss = 1500;
+			h.CustomDrawdownType = RutaMirrorDrawdownType.IntradayTrailing; h.CustomDailyLossLimit = 0; h.CustomConsistencyPct = 40; }, outDir, "rot_dll");
+		Harness rotClose = RunCustom(bars, h => { h.UseAccountRotation = true; h.PropAccountList = "X=Custom, Y=Topstep100K"; h.RotationMode = RutaMirrorRotationMode.UntilDayDone;
+			h.RestartFinishedAccounts = false; h.CustomProfitTarget = 2500; h.CustomMaxLoss = 1200; h.CustomDrawdownType = RutaMirrorDrawdownType.Static;
+			h.CustomDailyLossLimit = 600; h.CustomConsistencyPct = 0; }, outDir, "rot_close");
+		foreach (Harness h in new Harness[] { rotEvery, rotDay, rotDll, rotClose })
+		{
+			RutaCryptoMirror.TvEngine e = h.EngineForTest;
+			Check(e.AccountsError == null && e.Trades.Count > 0 && e.Trades.All(t => !string.IsNullOrEmpty(t.Account)), "rotation: every trade belongs to an account (" + e.Trades.Count + " trades)");
+			Check(e.Accounts.All(acc => e.AccountsDashboard().Contains(acc.Name)), "rotation: dashboard lists every account");
+		}
+		Check(new Harness[] { rotEvery, rotDay, rotDll, rotClose }.Sum(h => h.EngineForTest.AccountEvents.Count(x => x.Event == "PASSED" || x.Event == "FAILED")) > 0,
+			"rotation: evaluations finish (passed or failed) over 6000 bars");
+		List<string> used = rotEvery.EngineForTest.Trades.Select(t => t.Account.Split(' ')[0]).Distinct().OrderBy(x => x).ToList();
+		Check(string.Join(",", used.ToArray()) == "LU-1,TS-1,TS-2", "rotation every trade: TS-1, TS-2 and LU-1 take trades (" + string.Join(",", used.ToArray()) + ")");
+		Check(rotEvery.EngineForTest.AccountsDashboard().Contains("CAN'T FIT $1,") && !rotEvery.EngineForTest.AccountsDashboard().Contains("next: LU-2"),
+			"rotation: Lucid Pro ($1,200 daily limit) never takes a $1,500-risk trade with 'Block trades that could break max loss' on, and the dashboard says why");
+		Check(rotClose.EngineForTest.AccountEvents.Count(x => x.Event == "START") == 2, "no restarts: each slot runs one evaluation");
+		Check(rotDll.EngineForTest.Trades.Any(t => t.ExitSignal == "Firm daily loss" || t.ExitSignal == "Account max loss") ||
+			rotClose.EngineForTest.Trades.Any(t => t.ExitSignal == "Firm daily loss" || t.ExitSignal == "Account max loss"), "rotation: firm limits close trades intrabar");
+		Harness badSpec = RunCustom(bars.Take(400).ToList(), h => { h.UseAccountRotation = true; h.PropAccountList = "Q=NoSuchFirm, Q2"; }, outDir, "rot_bad");
+		Check(badSpec.EngineForTest.AccountsError != null && badSpec.EngineForTest.AccountsError.Contains("unknown plan 'NoSuchFirm'"), "rotation: a wrong plan name is reported");
+		Console.WriteLine(rotEvery.EngineForTest.AccountsDashboard());
 
 		Console.WriteLine(failures == 0 ? "ALL C# CHECKS PASSED" : failures + " C# CHECK(S) FAILED");
 		return failures == 0 ? 0 : 1;

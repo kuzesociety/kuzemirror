@@ -119,7 +119,7 @@ def intrabar(d, stop, target, o, h, l):
 
 
 def run(bars, use_ha=True, use_vol=True, use_sma=True, use_pd=False, pd_level=100.0, units='atr', execution='close',
-        sl_usd=1000.0, tp_usd=1000.0, qty=1, pv=20.0, tick=0.25, max_qty=10, daily=None):
+        sl_usd=1000.0, tp_usd=1000.0, qty=1, pv=20.0, tick=0.25, max_qty=10, daily=None, rot=None):
     o = [b['open'] for b in bars]
     h = [b['high'] for b in bars]
     l = [b['low'] for b in bars]
@@ -196,12 +196,122 @@ def run(bars, use_ha=True, use_vol=True, use_sma=True, use_pd=False, pd_level=10
 
     day = dict(pnl=0.0, trades=0, done=None)
 
+    # --- prop accounts (rotation simulator) ---
+    PRESETS = {  # name: (label, target, max loss, drawdown, daily loss limit, consistency %)
+        'topstep50k': ('Topstep 50K', 3000.0, 2000.0, 'eod', 0.0, 50.0),
+        'topstep50k-dll': ('Topstep 50K+DLL', 3000.0, 2000.0, 'eod', 1000.0, 50.0),
+        'topstep100k': ('Topstep 100K', 6000.0, 3000.0, 'eod', 0.0, 50.0),
+        'topstep150k': ('Topstep 150K', 9000.0, 4500.0, 'eod', 0.0, 50.0),
+        'lucidflex50k': ('Lucid Flex 50K', 3000.0, 2000.0, 'eod', 0.0, 50.0),
+        'lucidpro50k': ('Lucid Pro 50K', 3000.0, 2000.0, 'eod', 1200.0, 0.0),
+    }
+    R = dict(accounts=[], mode='every', block_acct=False, restart=True,
+             custom=('Custom', 3000.0, 2000.0, 'eod', 0.0, 50.0))
+    R.update(rot or {})
+    accts = []
+    for name, preset in R['accounts']:
+        label, target, maxloss, ddtype, dll, cons = R['custom'] if preset.lower() == 'custom' else PRESETS[preset.lower()]
+        accts.append(dict(name=name, label=label, target=target, maxloss=maxloss, dd=ddtype, dll=dll, cons=cons,
+                          ev=0, bal=0.0, peak_eod=0.0, peak_in=0.0, day=0.0, best=0.0, tdays=0, ntr=0,
+                          traded=False, status='ACTIVE', why=None))
+    acct_events = []
+    st = dict(owner=None, last=-1, chosen=-1, started=False, last_close=None)
+
+    def floor(a):
+        if a['dd'] == 'static':
+            return -a['maxloss']
+        return min(0.0, (a['peak_eod'] if a['dd'] == 'eod' else a['peak_in']) - a['maxloss'])
+
+    def event(a, i, kind, detail):
+        acct_events.append((i, a['name'], a['ev'], kind, detail, round(a['bal'], 2)))
+
+    def start_eval(a, i):
+        a.update(ev=a['ev'] + 1, bal=0.0, peak_eod=0.0, peak_in=0.0, day=0.0, best=0.0, tdays=0, ntr=0,
+                 traded=False, status='ACTIVE', why=None)
+        event(a, i, 'START', a['label'])
+
+    def passed(a, bal, dayp):
+        req = a['target']
+        if a['cons'] > 0:
+            req = max(req, max(a['best'], dayp) / (a['cons'] / 100.0))
+        return bal >= req
+
+    def day_stop(a, dayp, reason):
+        if reason == 'Firm daily loss' or (a['dll'] > 0 and dayp <= -a['dll']):
+            return 'firm daily loss'
+        if dr['goal'] > 0 and dayp >= dr['goal'] - dr['tol']:
+            return 'daily goal'
+        if dr['max_loss'] > 0 and dayp <= -dr['max_loss']:
+            return 'daily loss'
+        return None
+
+    def fits(a, bal, dayp, risk):
+        if dr['block']:
+            if dr['max_loss'] > 0 and dayp - risk < -dr['max_loss']:
+                return False
+            if a['dll'] > 0 and dayp - risk < -a['dll']:
+                return False
+        if R['block_acct'] and bal - risk < floor(a):
+            return False
+        return True
+
+    def select(i, ps):
+        n_ = len(accts)
+        if n_ == 0:
+            return None
+        risk = dist(i, 'sl') * contracts(i) * pv
+        closing = (c[i] - entry_px) * ps * pos_qty * pv if ps != 0 else 0.0
+        start = st['last'] if (R['mode'] == 'day' and st['last'] >= 0) else st['last'] + 1
+        for k in range(n_):
+            idx = (start + k) % n_
+            a = accts[idx]
+            if a['status'] != 'ACTIVE':
+                continue
+            bal, dayp = a['bal'], a['day']
+            if ps != 0 and a is st['owner']:
+                bal += closing
+                dayp += closing
+                if bal <= floor(a) or passed(a, bal, dayp) or day_stop(a, dayp, None) is not None:
+                    continue
+            if not fits(a, bal, dayp, risk):
+                continue
+            st['chosen'] = idx
+            return a
+        return None
+
+    def book(a, i, pnl, reason):
+        a['bal'] += pnl
+        a['day'] += pnl
+        a['ntr'] += 1
+        a['peak_in'] = max(a['peak_in'], a['bal'])
+        if reason == 'Account max loss' or a['bal'] <= floor(a):
+            a['status'] = 'FAILED'
+            event(a, i, 'FAILED', 'max loss')
+        elif passed(a, a['bal'], a['day']):
+            a['status'] = 'PASSED'
+            event(a, i, 'PASSED', '%d trading days' % a['tdays'])
+        else:
+            why = day_stop(a, a['day'], reason)
+            if why is not None:
+                a['status'] = 'DONE TODAY'
+                a['why'] = why
+                event(a, i, 'DAY DONE', why)
+
     def close_trade(i, name, price):
         nonlocal position
-        trades.append((entry_bar, 'Long' if position > 0 else 'Short', entry_px, i, name, price, pos_qty))
-        day['pnl'] += (price - entry_px) * position * pos_qty * pv
+        pnl = (price - entry_px) * position * pos_qty * pv
+        acct = None
+        if rot and st['owner'] is not None:
+            a = st['owner']
+            acct = '%s #%d' % (a['name'], a['ev'])
+        trades.append((entry_bar, 'Long' if position > 0 else 'Short', entry_px, i, name, price, pos_qty, acct))
+        day['pnl'] += pnl
         day['trades'] += 1
-        if day['done'] is None:
+        if rot and st['owner'] is not None:
+            a = st['owner']
+            st['owner'] = None
+            book(a, i, pnl, name)
+        elif not rot and day['done'] is None:
             if dr['goal'] > 0 and day['pnl'] >= dr['goal'] - dr['tol']:
                 day['done'] = 'daily goal'
             elif dr['max_loss'] > 0 and day['pnl'] <= -dr['max_loss']:
@@ -231,7 +341,53 @@ def run(bars, use_ha=True, use_vol=True, use_sma=True, use_pd=False, pd_level=10
     for i in range(n):
         if new_session[i]:
             day.update(pnl=0.0, trades=0, done=None)
-        if execution == 'orders' and position != 0:
+        if rot:
+            if not st['started']:
+                st['started'] = True
+                for ac in accts:
+                    start_eval(ac, i)
+            elif new_session[i]:
+                for ac in accts:
+                    if st['last_close'] is not None:
+                        eod = ac['bal']
+                        if ac is st['owner'] and position != 0:
+                            eod += (st['last_close'] - entry_px) * position * pos_qty * pv
+                        ac['peak_eod'] = max(ac['peak_eod'], eod)
+                        ac['best'] = max(ac['best'], ac['day'])
+                    ac.update(day=0.0, traded=False, why=None)
+                    if ac['status'] == 'DONE TODAY':
+                        ac['status'] = 'ACTIVE'
+                    if ac['status'] in ('PASSED', 'FAILED') and R['restart']:
+                        start_eval(ac, i)
+        if rot and position != 0 and st['owner'] is not None:
+            # firm limits at the worst price of the bar (open, adverse extreme, favorable extreme)
+            ac, d = st['owner'], position
+            pp = pos_qty * pv
+            p_floor = entry_px + d * (floor(ac) - ac['bal']) / pp
+            p_dll = entry_px + d * (-ac['dll'] - ac['day']) / pp if ac['dll'] > 0 else None
+
+            def beyond(dd, price, level):
+                return level is not None and (price <= level if dd > 0 else price >= level)
+            reason = fill = None
+            orders_mode = execution == 'orders'
+            if beyond(d, o[i], p_floor): reason, fill = 'Account max loss', o[i]
+            elif beyond(d, o[i], p_dll): reason, fill = 'Firm daily loss', o[i]
+            elif orders_mode and beyond(d, o[i], sl): reason, fill = 'Stop Loss', o[i]
+            elif orders_mode and beyond(-d, o[i], tp): reason, fill = 'Take Profit', o[i]
+            else:
+                adverse = l[i] if d > 0 else h[i]
+                levels = [(p_floor, 'Account max loss'), (p_dll, 'Firm daily loss')] + ([(sl, 'Stop Loss')] if orders_mode else [])
+                for lv, nm in levels:       # first touched = closest to the open; ties keep the earlier (firm) one
+                    if beyond(d, adverse, lv) and (reason is None or (lv > fill if d > 0 else lv < fill)):
+                        reason, fill = nm, lv
+                if reason is None and orders_mode and beyond(-d, h[i] if d > 0 else l[i], tp):
+                    reason, fill = 'Take Profit', tp
+            if reason is not None:
+                close_trade(i, reason, fill)
+            else:
+                fav = h[i] if d > 0 else l[i]
+                ac['peak_in'] = max(ac['peak_in'], ac['bal'] + (fav - entry_px) * d * pp)
+        elif execution == 'orders' and position != 0:
             res, fill = intrabar(position, sl, tp, o[i], h[i], l[i])
             if res:
                 close_trade(i, 'Stop Loss' if res < 0 else 'Take Profit', fill)
@@ -245,7 +401,17 @@ def run(bars, use_ha=True, use_vol=True, use_sma=True, use_pd=False, pd_level=10
         sig = 0
         if lc and ps <= 0: sig = 1
         if sc and ps >= 0: sig = -1
-        block = block_reason(i, ps, in_hours) if sig else None
+        chosen = None
+        block = None
+        if sig and not rot:
+            block = block_reason(i, ps, in_hours)
+        elif sig:
+            if not in_hours:
+                block = 'hours'
+            else:
+                chosen = select(i, ps)
+                if chosen is None:
+                    block = 'no account'
         blocks[i] = (sig, block)
         orders = []                        # placed in script order
         if sig == 1 and block is None:
@@ -274,6 +440,12 @@ def run(bars, use_ha=True, use_vol=True, use_sma=True, use_pd=False, pd_level=10
                     pos_qty = contracts(i)
                     entry_bar, entry_px = i, c[i]
                     entry_dir[i] = side
+                    if rot and chosen is not None:
+                        st['owner'] = chosen
+                        st['last'] = st['chosen']
+                        if not chosen['traded']:
+                            chosen['traded'] = True
+                            chosen['tdays'] += 1
             else:
                 # a close order can only reduce the position it was placed against; if that position
                 # was reversed by an earlier order of this bar, it is cancelled
@@ -282,6 +454,7 @@ def run(bars, use_ha=True, use_vol=True, use_sma=True, use_pd=False, pd_level=10
         # a blocked reversal still closes the open trade
         if sig != 0 and block is not None and position != 0 and position == ps:
             close_trade(i, 'Signal exit', c[i])
+        st['last_close'] = c[i]
 
     # --- setup report: every bar/side followed forward with the SL/TP-on-close rule ---
     buckets = {(b, sd): [0, 0, 0, 0.0] for b in range(11) for sd in ('long', 'short')}
@@ -339,7 +512,7 @@ def run(bars, use_ha=True, use_vol=True, use_sma=True, use_pd=False, pd_level=10
 
     return dict(ho=ho, hc=hc, src=src, rsi=r, osc=osc, atr=a, trend=trend,
                 longcond=longcond, shortcond=shortcond, pos=pos_before, trades=trades, pdh=pdh, pdl=pdl,
-                pd_long=pd_long, pd_short=pd_short,
+                pd_long=pd_long, pd_short=pd_short, acct_events=acct_events,
                 setups=setups, buckets=buckets)
 
 
@@ -351,12 +524,13 @@ def read_csv(path):
 def load_trades(path):
     rows = read_csv(path)
     return [(rows[k]['NT bar time (close)'], rows[k]['Type'].split()[1], float(rows[k]['Price']),
-             rows[k + 1]['NT bar time (close)'], rows[k + 1]['Signal'], float(rows[k + 1]['Price']), int(rows[k + 1]['Contracts']))
+             rows[k + 1]['NT bar time (close)'], rows[k + 1]['Signal'], float(rows[k + 1]['Price']), int(rows[k + 1]['Contracts']),
+             rows[k + 1].get('Account'))
             for k in range(0, len(rows), 2)]
 
 
 def ref_trade_rows(ref, times):
-    return [(times[eb], side, ep, times[xb], sig, xp, q) for (eb, side, ep, xb, sig, xp, q) in ref['trades']]
+    return [(times[eb], side, ep, times[xb], sig, xp, q, acct) for (eb, side, ep, xb, sig, xp, q, acct) in ref['trades']]
 
 
 def load_setups(path):
@@ -475,6 +649,43 @@ def main(d):
         b_ok = buckets_match(d + '/nt_buckets_%s.csv' % suffix, refm['buckets'])
         print('%s: %d trades; trades identical %s, setups identical %s, report identical %s' % (suffix, len(refm['trades']), t_ok, s_ok, b_ok))
         modes_ok = modes_ok and t_ok and s_ok and b_ok
+
+    TS_LU = [('TS-1', 'Topstep50K'), ('TS-2', 'Topstep50K'), ('LU-1', 'LucidFlex50K'), ('LU-2', 'LucidPro50K')]
+    PLAN = dict(units='usd_atr', sl_usd=1500.0, tp_usd=750.0, execution='orders', pv=2.0, max_qty=40, use_pd=True, pd_level=50.0,
+                daily=dict(goal=1500.0, tol=100.0, max_loss=2000.0))
+    rot_runs = (
+        ('rot_every', dict(PLAN, rot=dict(accounts=TS_LU, mode='every'))),
+        ('rot_day', dict(PLAN, rot=dict(accounts=TS_LU, mode='day', block_acct=True))),
+        ('rot_dll', dict(PLAN, rot=dict(accounts=[('A', 'Topstep50K-DLL'), ('B', 'Custom'), ('C', 'LucidPro50K')], mode='every',
+                                        custom=('Custom', 3000.0, 1500.0, 'intraday', 0.0, 40.0)))),
+        ('rot_close', dict(rot=dict(accounts=[('X', 'Custom'), ('Y', 'Topstep100K')], mode='day', restart=False,
+                                    custom=('Custom', 2500.0, 1200.0, 'static', 600.0, 0.0)))),
+    )
+    for suffix, kw in rot_runs:
+        refm = run(bars, **kw)
+        t_ok = load_trades(d + '/nt_trades_%s.csv' % suffix) == ref_trade_rows(refm, times)
+        s_ok = load_setups(d + '/nt_setups_%s.csv' % suffix) == ref_setup_rows(refm, times)
+        b_ok = buckets_match(d + '/nt_buckets_%s.csv' % suffix, refm['buckets'])
+        nt_ev = [(r['nt_bar_time'], r['account'], int(r['eval']), r['event'], r['detail'], float(r['balance']))
+                 for r in read_csv(d + '/nt_accounts_%s.csv' % suffix)]
+        ref_ev = [(times[i], nm, ev, kind, det, bal) for (i, nm, ev, kind, det, bal) in refm['acct_events']]
+        e_ok = nt_ev == ref_ev
+        npass = sum(1 for e in ref_ev if e[3] == 'PASSED')
+        nfail = sum(1 for e in ref_ev if e[3] == 'FAILED')
+        print('%s: %d trades, %d account events (%d passed, %d failed); trades+accounts identical %s, setups %s, report %s, events %s'
+              % (suffix, len(refm['trades']), len(ref_ev), npass, nfail, t_ok, s_ok, b_ok, e_ok))
+        if not e_ok:
+            for x, y in zip(nt_ev, ref_ev):
+                if x != y:
+                    print('first event diff:\n  C#     ', x, '\n  Python ', y)
+                    break
+            print('  counts C# %d Python %d' % (len(nt_ev), len(ref_ev)))
+        if not t_ok:
+            for x, y in zip(load_trades(d + '/nt_trades_%s.csv' % suffix), ref_trade_rows(refm, times)):
+                if x != y:
+                    print('first trade diff:\n  C#     ', x, '\n  Python ', y)
+                    break
+        modes_ok = modes_ok and t_ok and s_ok and b_ok and e_ok
 
     ok = bad == 0 and same and bucket_ok and setups_ok and switch_ok and modes_ok
     print('ALL PYTHON CROSS-CHECKS PASSED' if ok else 'PYTHON CROSS-CHECK FAILED')

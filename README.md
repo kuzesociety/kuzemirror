@@ -21,7 +21,8 @@ The martingale and leverage parts are removed. Nothing in the entry or exit logi
 * `RutaCryptoMirrorV2.cs`: frozen snapshot with the dollar exits and ATR sizing. Don't regenerate it.
 * `RutaCryptoMirrorV3.cs`: frozen. V2 plus the **Use PDH/PDL filter** switch (off = identical to V2).
 * `RutaCryptoMirrorV4.cs`: frozen. V3 plus **PDH/PDL Range Level (%)** (default 50 = middle of the previous session's range; 100 = identical to V3's filter; filter off = identical to V2/V3).
-* `RutaCryptoMirrorV5.cs`: V4 plus **9. Daily rules & trading hours** (all off = identical to V4).
+* `RutaCryptoMirrorV5.cs`: frozen. V4 plus **9. Daily rules & trading hours** (all off = identical to V4).
+* `RutaCryptoMirrorV6.cs`: V5 plus **10. Prop accounts (simulated rotation)** with the accounts dashboard (off = identical to V5).
 
 **Nothing on the chart?**
 * No status box at the bottom-left: the strategy is not running. Check the **Enabled** box. Then look at **Control Center → Log** for a red line mentioning RutaCryptoMirror.
@@ -221,6 +222,45 @@ Details:
 * Today's result uses the strategy's own trade prices before commissions (the same numbers as the stats box); the tolerance absorbs the difference. Open trades are limited by their stop orders, not by the daily numbers.
 * On the chart: "DAILY GOAL / DAILY MAX LOSS - done for today" at the bar where it happened. Blocked signals show `skip buy: daily goal`, `loss room` or `hours`, and the stats box shows today's result and status.
 
+### Prop accounts dashboard (group 10, V6, simulated)
+
+**Use Account Rotation** turns the strategy's trades into a set of prop evaluations. Each new trade goes to **one** account, and every account follows its firm's rules. A table at the top right of the chart shows every account. This is a **simulation**: no orders go to other accounts yet. The strategy's own orders still trade every trade on the account it runs on.
+
+**Setup**
+1. Group 10: **Use Account Rotation** = on.
+2. **Accounts**: `name=plan`, separated by commas, e.g. `TS-1=Topstep50K, TS-2=Topstep50K, LU-1=LucidFlex50K`. A wrong plan name is reported at the top of the dashboard.
+3. **Rotation Mode**:
+   * `EveryTrade`: each new trade goes to the next account in the list.
+   * `UntilDayDone`: stay on one account until its day is done (daily goal, a loss limit, or no room for the next trade), then move to the next.
+4. Group 9 (daily goal / tolerance / max loss / block) now applies **per account**. Trading hours stay global.
+
+**Plans** (from the firms' published 50K/100K/150K rules as of Oct 2026, so verify before relying on them; all amounts are relative to the starting balance):
+
+| Plan | Profit target | Max loss (trailing end of day, stops at start) | Daily loss limit | Consistency |
+|---|---|---|---|---|
+| `Topstep50K` | $3,000 | $2,000 | none | best day ≤ 50% of profit |
+| `Topstep50K-DLL` | $3,000 | $2,000 | $1,000 | 50% |
+| `Topstep100K` | $6,000 | $3,000 | none | 50% |
+| `Topstep150K` | $9,000 | $4,500 | none | 50% |
+| `LucidFlex50K` | $3,000 | $2,000 | none | 50% |
+| `LucidPro50K` | $3,000 | $2,000 | $1,200 | none |
+| `Custom` | the *Custom:* settings in group 10 (any target, max loss, drawdown type, daily limit, consistency) | | | |
+
+**How the rules are simulated**
+* **Max loss line:** end-of-day trailing (or intraday trailing / static for Custom). It trails the highest balance and stops at the starting balance. The firm watches open trades in real time, so the line is checked at the **worst price of every bar**. A trade that dips through it **fails the account** even if it recovers later. The trade is closed at the line ("Account max loss").
+* **Firm daily loss limit:** checked the same way. Hitting it closes the trade ("Firm daily loss") and ends that account's day, not the evaluation.
+* **Passed:** profit ≥ target and, with a consistency rule, best day ≤ X% of total profit (otherwise the required profit rises). **Failed:** max loss line reached.
+* **Restart Finished Accounts:** a passed or failed slot starts a new evaluation at the next session, so the totals show **passes per month**, the **pass rate** and the **fees** (*Evaluation Fee*).
+* **Block trades that could break max loss** (group 9) also checks each account's firm daily limit. **Block trades that could fail the account** (group 10) skips an account whose remaining room is smaller than the trade's risk.
+
+**Reading the dashboard:** Status is `ACTIVE`, `IN TRADE`, `DONE TODAY (reason)`, `PASSED`, `FAILED`, or `CAN'T FIT $X RISK` (the next trade's full stop would break this account's limit). **Room** is the distance to the max loss line, and **Pass/Fail** counts finished evaluations in that slot. The bottom line shows evaluations, passed, failed, pass rate, average trading days to pass, passes per month and fees. PASSED / FAILED are also marked on the chart. The Output window gets the table when loading finishes. With *Export Trades CSV*, the trades file gets an **Account** column and `<instrument>_accounts.csv` lists every event.
+
+**Things the simulation shows about the $1,500 / $750 plan**
+* **Lucid Pro 50K can't take it.** Its $1,200 daily limit is smaller than the $1,500 risk, so with "Block trades that could break max loss" on it shows `CAN'T FIT` and never trades. Use Lucid Flex, or a smaller Stop Loss $.
+* **"Block trades that could fail the account" can leave accounts stuck.** After one $1,500 loss only $500 of room is left, so the account never trades again and never passes or fails. Leave it off for this plan, which is what the pass-rate simulation assumed.
+
+**Not modeled:** commissions and slippage, minimum trading days, payout rules, and rule changes by the firms. The end of the day is the end of the chart's session. Best day uses closed trades.
+
 ## 8. Differences that cannot be removed
 
 * **Fill price.** No real broker can fill at the close of a bar that has already closed. NinjaTrader's real fills come one tick later; TradingView's simulated fill is the close. The drawn markers and the stats box use TradingView's price; NinjaTrader's Strategy Performance uses the real fills.
@@ -290,6 +330,7 @@ On NQ the size barely changes, so the stop ends up wherever the dollars put it. 
 * recomputes the dollar-exit modes ($500 stop / $1000 target, both on-close and with stop/target orders) and the ATR-sized mode (MNQ, $1000 / $1500, capped at 12): same trades, contract counts, setups and report rows;
 * recomputes the PDH/PDL levels and the long / short lines, and runs with the filter on at levels 50 and 100: same values on every bar, same trades, setups and report rows. With the filter off, 84 output files (trades in every exit mode, per-bar values, setups, report rows) are identical to the version before the filter was added. At level 100, the trades, setups and report rows are identical to V3's filter;
 * recomputes the daily rules and trading hours: the planned prop setup (MNQ, $1,500 / $750, PD 50%, goal $1,500 − $100, max loss $2,000), on-close exits with daily rules, an 18:00 → 16:45 window with flatten and a 09:30 → 16:00 window without. Every trade, setup and report row matches. With all of them off, 126 output files are identical to V4;
+* recomputes the prop account rotation: 4 configurations (the planned setup on Topstep + Lucid accounts rotating every trade; until the day is done with the account-loss block; Topstep with its daily limit, a custom intraday-trailing account and Lucid Pro; on-close exits with a custom static account and Topstep 100K without restarts). On all 6 datasets every trade, the account that took it, and every account event (start, day done, passed, failed with balances) match. With rotation off, 198 output files are identical to V5;
 * recomputes the setup report the same way: all 848 RSI-trigger setups (filters, blocker, outcome, R) and every report row match. A run with the SMA filter switched off matches too. Every real TP/SL trade has the same hindsight outcome as its setup.
 
 This proves the C# follows the Pine script exactly. It does not replace the real side-by-side check in section 3: neither TradingView nor NinjaTrader can run in this environment, so the compile was against stand-ins, not NinjaTrader itself.
