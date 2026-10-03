@@ -266,7 +266,9 @@ namespace NinjaTrader.NinjaScript.AddOns
 					Save();
 					return;
 				}
-				if (start < sessionStart.AddHours(2))
+				// within 2 hours of the known start = the same session; earlier than that = time went back (Market Replay)
+				bool replay = start < sessionStart.AddHours(-2);
+				if (!replay && start < sessionStart.AddHours(2))
 					return;
 				foreach (RutaPropSlot s in slots)
 				{
@@ -275,7 +277,8 @@ namespace NinjaTrader.NinjaScript.AddOns
 				}
 				sessionStart = start;
 				sessionId++;
-				Log("New session " + start.ToString("yyyy-MM-dd HH:mm", Inv) + ": today's P&L reset, DONE TODAY accounts are READY again");
+				Log((replay ? "Session time went back (Market Replay?): new day " : "New session ") + start.ToString("yyyy-MM-dd HH:mm", Inv)
+					+ ": today's P&L reset, DONE TODAY accounts are READY again");
 				Save();
 			}
 		}

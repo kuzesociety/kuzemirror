@@ -176,6 +176,15 @@ public static class RouterTests
 		e.R.SessionStarted(new DateTime(2026, 9, 30, 18, 1, 0));
 		e.R.SessionStarted(new DateTime(2026, 9, 30, 18, 9, 0));
 		check(e.Row("A").DayPnl == 500, "router: the same session reported by other charts does not reset the day");
+		// Market Replay: sessions from the past, then forward again
+		DryTrade(e, 1, 5, 100, 200, 20000, 20200);		// +2000 -> done today
+		e.R.SessionStarted(new DateTime(2026, 9, 20, 18, 5, 0));
+		RutaPropRow rp = e.Row("A");
+		DryTrade(e, 1, 5, 100, 50, 20000, 20050);
+		e.R.SessionStarted(new DateTime(2026, 9, 21, 18, 5, 0));
+		e.R.SessionStarted(new DateTime(2026, 9, 21, 18, 9, 0));
+		check(rp.DayPnl == 0 && rp.Status == RutaPropRouter.Ready && rp.BestDay == 2500 && e.Row("A").DayPnl == 0 && e.Row("A").Days == 2 && e.Row("A").Trades == 3,
+			"router: Market Replay (session dates earlier than the last one) still starts a new day at each session");
 	}
 
 	private static void LiveFlow(Action<bool, string> check)
