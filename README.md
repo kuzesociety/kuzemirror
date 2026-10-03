@@ -24,7 +24,7 @@ The martingale and leverage parts are removed. Nothing in the entry or exit logi
 * `RutaCryptoMirrorV4.cs`: frozen. V3 plus **PDH/PDL Range Level (%)** (default 50 = middle of the previous session's range; 100 = identical to V3's filter; filter off = identical to V2/V3).
 * `RutaCryptoMirrorV5.cs`: frozen. V4 plus **9. Daily rules & trading hours** (all off = identical to V4).
 * `RutaCryptoMirrorV6.cs`: frozen. V5 plus **10. Prop accounts (simulated rotation)** with the accounts dashboard (off = identical to V5).
-* `RutaCryptoMirrorV7.cs`: V6 plus **11. Prop Account Manager (live)**: the switch that hands live trades to the Prop Account Manager window (off = identical to V6). **V7 needs the two AddOns files**, see below.
+* `RutaCryptoMirrorV7.cs`: V6 plus **11. Prop Account Manager (live)**: the switch that hands live trades to the Prop Account Manager window, and a fix to the `UntilDayDone` rotation (section 7). With the switch off it is identical to V6, except for that fix. **V7 needs the two AddOns files**, see below.
 
 **Prop Account Manager (V7): 3 files.**
 1. `RutaCryptoMirrorV7.cs` → `Documents\NinjaTrader 8\bin\Custom\Strategies\`
@@ -240,7 +240,8 @@ Details:
 2. **Accounts**: `name=plan`, separated by commas, e.g. `TS-1=Topstep50K, TS-2=Topstep50K, LU-1=LucidFlex50K`. A wrong plan name is reported at the top of the dashboard.
 3. **Rotation Mode**:
    * `EveryTrade`: each new trade goes to the next account in the list.
-   * `UntilDayDone`: stay on one account until its day is done (daily goal, a loss limit, or no room for the next trade), then move to the next.
+   * `UntilDayDone`: stay on one account until its day is done (daily goal, a loss limit, or no room for the next trade), then move to the next. The next trade goes to the next account even if it comes on a later day. After the last account it starts again at the first, skipping accounts that are done for today, passed or failed. (V6 went back to the account that had just finished when the next session started; V7 fixes that.)
+   * `EveryTrade` also goes around in a circle: 1, 2, … 10, 1, 2, … skipping accounts that can't trade. When no account can trade, the signal is skipped until the next session.
 4. Group 9 (daily goal / tolerance / max loss / block) now applies **per account**. Trading hours stay global.
 
 **Plans** (from the firms' published 50K/100K/150K rules as of Oct 2026, so verify before relying on them; all amounts are relative to the starting balance):
@@ -305,7 +306,7 @@ Group 10 only **simulates** accounts on the chart. The Prop Account Manager is a
 
 **Safety behavior**
 * No account free (all done, in a trade, not connected, can't fit) → the signal is skipped, and the log says why for each account.
-* One trade per account at a time. A reversal first closes the old trade; the new entry follows as soon as the close is booked, and goes to the same account with `UntilDayDone`.
+* One trade per account at a time. A reversal first closes the old trade; the new entry follows as soon as the close is booked, and goes to the same account with `UntilDayDone` (unless that close ended the account's day).
 * Entry not filled in 20 s → cancelled. Stop/target rejected → the position is closed at market. Exit order rejected, or the stop/target not cancelled within 10 s → NinjaTrader **Flatten** on that account; that trade's P&L then comes from the account's cash change (or is estimated and marked in the note).
 * A position that won't close after Flatten → routing **pauses** and the account shows `CHECK ACCOUNT`.
 * **FLATTEN ALL** pauses and closes every trade the manager opened. Press it again to force NinjaTrader's Flatten. Positions you opened yourself are not touched: use NinjaTrader's *Flatten Everything* for those.

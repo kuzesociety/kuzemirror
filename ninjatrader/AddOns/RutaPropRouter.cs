@@ -222,6 +222,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 		private DateTime sessionStart = DateTime.MinValue;
 		private long sessionId = 1;
 		private int lastAssigned = -1, nextTradeId = 1;
+		private bool moveOn;		// UntilDayDone: the current account is done (day, target or max loss): the next trade goes to the next account
 		private double lastRisk = double.NaN;
 		private readonly List<string> logLines = new List<string>();
 		private int logVersion;
@@ -453,6 +454,8 @@ namespace NinjaTrader.NinjaScript.AddOns
 					return "This account has an open trade.";
 				Log("Removed account " + SlotName(index));
 				slots.RemoveAt(index);
+				if (lastAssigned == index)
+					moveOn = true;
 				if (lastAssigned >= index)
 					lastAssigned--;
 				Save();
@@ -784,7 +787,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 			int n = slots.Count;
 			if (n == 0)
 				return -1;
-			int start = settings.Rotation == RutaPropRotation.UntilDayDone && lastAssigned >= 0 ? lastAssigned : lastAssigned + 1;
+			int start = settings.Rotation == RutaPropRotation.UntilDayDone && lastAssigned >= 0 && !moveOn ? lastAssigned : lastAssigned + 1;
 			for (int k = 0; k < n; k++)
 			{
 				int idx = (start + k) % n;
@@ -827,6 +830,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 			}
 			RutaPropSlot s = slots[idx];
 			lastAssigned = idx;
+			moveOn = false;
 			t.Slot = s;
 			s.Trade = t;
 			if (!t.Live)
@@ -1176,6 +1180,8 @@ namespace NinjaTrader.NinjaScript.AddOns
 				+ " | account P&L " + Money(b.Pnl) + ", today " + Money(b.DayPnl));
 			Remove(t);
 			Evaluate(s, b, true);
+			if (b.Status != Ready && lastAssigned >= 0 && lastAssigned < slots.Count && slots[lastAssigned] == s)
+				moveOn = true;
 			if (estimated)
 			{
 				Log("!!! " + s.Account + ": that P&L is an estimate - compare with the firm's dashboard and use Edit if needed");
@@ -1406,7 +1412,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 						new XAttribute("CustomDailyLossLimit", D(settings.CustomDailyLossLimit)), new XAttribute("CustomConsistencyPct", D(settings.CustomConsistencyPct)));
 					XElement root = new XElement("RutaPropManager", new XAttribute("Version", 1), st,
 						new XElement("Session", new XAttribute("Start", sessionStart.Ticks), new XAttribute("Id", sessionId),
-							new XAttribute("LastAssigned", lastAssigned), new XAttribute("NextTradeId", nextTradeId)));
+							new XAttribute("LastAssigned", lastAssigned), new XAttribute("MoveOn", moveOn), new XAttribute("NextTradeId", nextTradeId)));
 					foreach (RutaPropSlot s in slots)
 					{
 						XElement e = new XElement("Account", new XAttribute("Enabled", s.Enabled), new XAttribute("Name", s.Account), new XAttribute("Plan", s.PlanKey),
@@ -1456,6 +1462,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 				sessionStart = ticks > 0 && ticks <= DateTime.MaxValue.Ticks ? new DateTime(ticks) : DateTime.MinValue;
 				sessionId = Math.Max(1, LongAttr(se, "Id", 1));
 				lastAssigned = (int)LongAttr(se, "LastAssigned", -1);
+				moveOn = BoolAttr(se, "MoveOn", false);
 				nextTradeId = (int)Math.Max(1, LongAttr(se, "NextTradeId", 1));
 				foreach (XElement e in root.Elements("Account"))
 				{

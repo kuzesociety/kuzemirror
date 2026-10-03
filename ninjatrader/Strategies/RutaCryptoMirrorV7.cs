@@ -1323,6 +1323,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 			private readonly List<AccountEvent> pendingEvents = new List<AccountEvent>();
 			private PropAccount owner;				// account of the open trade
 			private int lastAssigned = -1, chosenIndex = -1;
+			private bool moveOn;					// UntilDayDone: the current account's day (or evaluation) is over, the next trade goes to the next account
 			private bool accountsStarted;
 			private double lastClose = double.NaN, lastRisk = double.NaN;
 			private int evalsStarted, evalsPassed, evalsFailed, passDaysSum;
@@ -1521,7 +1522,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 					return null;
 				double risk = slDist * qty * s.PointValue;
 				double closing = pos != 0 ? (close - positionPrice) * pos * positionQty * s.PointValue : 0;
-				int start = s.Rotation == RutaMirrorV7RotationMode.UntilDayDone && lastAssigned >= 0 ? lastAssigned : lastAssigned + 1;
+				int start = s.Rotation == RutaMirrorV7RotationMode.UntilDayDone && lastAssigned >= 0 && !moveOn ? lastAssigned : lastAssigned + 1;
 				for (int k = 0; k < n; k++)
 				{
 					int idx = (start + k) % n;
@@ -1548,6 +1549,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 			{
 				owner = a;
 				lastAssigned = chosenIndex;
+				moveOn = false;
 				if (!a.TradedToday)
 				{
 					a.TradedToday = true;
@@ -1586,12 +1588,14 @@ namespace NinjaTrader.NinjaScript.Strategies
 						AddAccountEvent(a, barIndex, time, "DAY DONE", done);
 					}
 				}
+				if (a.Status != "ACTIVE" && lastAssigned >= 0 && lastAssigned < accounts.Count && accounts[lastAssigned] == a)
+					moveOn = true;
 			}
 
 			private string NextAccountName()
 			{
 				int n = accounts.Count;
-				int start = s.Rotation == RutaMirrorV7RotationMode.UntilDayDone && lastAssigned >= 0 ? lastAssigned : lastAssigned + 1;
+				int start = s.Rotation == RutaMirrorV7RotationMode.UntilDayDone && lastAssigned >= 0 && !moveOn ? lastAssigned : lastAssigned + 1;
 				for (int k = 0; k < n; k++)
 				{
 					PropAccount a = accounts[(start + k) % n];

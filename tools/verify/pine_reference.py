@@ -216,7 +216,7 @@ def run(bars, use_ha=True, use_vol=True, use_sma=True, use_pd=False, pd_level=10
                           ev=0, bal=0.0, peak_eod=0.0, peak_in=0.0, day=0.0, best=0.0, tdays=0, ntr=0,
                           traded=False, status='ACTIVE', why=None))
     acct_events = []
-    st = dict(owner=None, last=-1, chosen=-1, started=False, last_close=None)
+    st = dict(owner=None, last=-1, chosen=-1, started=False, last_close=None, move=False)
 
     def floor(a):
         if a['dd'] == 'static':
@@ -262,7 +262,7 @@ def run(bars, use_ha=True, use_vol=True, use_sma=True, use_pd=False, pd_level=10
             return None
         risk = dist(i, 'sl') * contracts(i) * pv
         closing = (c[i] - entry_px) * ps * pos_qty * pv if ps != 0 else 0.0
-        start = st['last'] if (R['mode'] == 'day' and st['last'] >= 0) else st['last'] + 1
+        start = st['last'] if (R['mode'] == 'day' and st['last'] >= 0 and not st['move']) else st['last'] + 1
         for k in range(n_):
             idx = (start + k) % n_
             a = accts[idx]
@@ -297,6 +297,9 @@ def run(bars, use_ha=True, use_vol=True, use_sma=True, use_pd=False, pd_level=10
                 a['status'] = 'DONE TODAY'
                 a['why'] = why
                 event(a, i, 'DAY DONE', why)
+        # until-day-done: once the current account is done (day, pass or fail) the next trade goes to the next account
+        if a['status'] != 'ACTIVE' and 0 <= st['last'] < len(accts) and accts[st['last']] is a:
+            st['move'] = True
 
     def close_trade(i, name, price):
         nonlocal position
@@ -444,6 +447,7 @@ def run(bars, use_ha=True, use_vol=True, use_sma=True, use_pd=False, pd_level=10
                     if rot and chosen is not None:
                         st['owner'] = chosen
                         st['last'] = st['chosen']
+                        st['move'] = False
                         if not chosen['traded']:
                             chosen['traded'] = True
                             chosen['tdays'] += 1

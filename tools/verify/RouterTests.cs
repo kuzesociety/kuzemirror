@@ -158,6 +158,22 @@ public static class RouterTests
 		for (int k = 0; k < 5; k++)
 			DryTrade(e, 1, 5, 100, 50, 20000, 20050);
 		check(e.Row("A").Trades == 3 && e.Row("B").Trades == 2 && e.Row("C").Trades == 0, "router: UntilDayDone stays on one account until its day is done");
+		e = Make(null, RutaPropMode.DryRun, "Topstep50K", "A", "B", "C");
+		e.Settings(s => s.Rotation = RutaPropRotation.UntilDayDone);
+		for (int k = 0; k < 3; k++)
+			DryTrade(e, 1, 5, 100, 50, 20000, 20050);		// A reaches the goal on the day's last trade
+		NextDay(e);
+		DryTrade(e, 1, 5, 100, 50, 20000, 20050);
+		NextDay(e);
+		DryTrade(e, 1, 5, 100, 50, 20000, 20050);
+		check(e.Row("A").Trades == 3 && e.Row("B").Trades == 2, "router: UntilDayDone - the next day continues with the NEXT account (B), not the one that finished (A)");
+		for (int k = 0; k < 2; k++)
+			DryTrade(e, 1, 5, 100, 50, 20000, 20050);		// B reaches the goal -> C
+		for (int k = 0; k < 3; k++)
+			DryTrade(e, 1, 5, 100, 50, 20000, 20050);		// C reaches the goal -> back to A
+		DryTrade(e, 1, 5, 100, 50, 20000, 20050);
+		check(e.Row("B").Trades == 4 && e.Row("C").Trades == 3 && e.Row("A").Trades == 4 && e.Row("A").Status == RutaPropRouter.Ready,
+			"router: UntilDayDone - after the last account it goes back to the first one (A)");
 
 		// paused / size cap / bad input
 		e = Make(null, RutaPropMode.DryRun, "Topstep50K", "A");
