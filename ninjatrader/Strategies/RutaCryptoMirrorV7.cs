@@ -260,9 +260,11 @@ namespace NinjaTrader.NinjaScript.Strategies
 			}
 			else if (State == State.Realtime)
 			{
-				// tell the manager which trading day it is (a new session resets each account's day)
+				// tell the manager which trading day it is (a new session resets each account's day), and show its window
 				if (RouteToPropManager && lastSessionStart != DateTime.MinValue)
 					NinjaTrader.NinjaScript.AddOns.RutaPropRouter.Instance.SessionStarted(lastSessionStart);
+				if (RouteToPropManager && !NinjaTrader.NinjaScript.AddOns.RutaPropRouter.OpenWindow(false))
+					Print(Name + ": the Prop Account Manager window was not found - install RutaPropManagerWindow.cs in bin\\Custom\\AddOns");
 			}
 			else if (State == State.Terminated)
 			{

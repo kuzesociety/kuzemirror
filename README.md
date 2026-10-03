@@ -29,7 +29,7 @@ The martingale and leverage parts are removed. Nothing in the entry or exit logi
 **Prop Account Manager (V7): 3 files.**
 1. `RutaCryptoMirrorV7.cs` → `Documents\NinjaTrader 8\bin\Custom\Strategies\`
 2. `RutaPropRouter.cs` and `RutaPropManagerWindow.cs` → `Documents\NinjaTrader 8\bin\Custom\AddOns\`
-3. Compile (**F5** in the NinjaScript Editor). **Control Center → New → Prop Account Manager** opens the window.
+3. Compile (**F5** in the NinjaScript Editor), then **restart NinjaTrader** so it loads the add-on. Open the window from **Control Center → New → Prop Account Manager**, or just enable V7 on a chart with **Route to Prop Account Manager** = on: the window opens by itself when the strategy starts. If the menu entry is missing, **New → NinjaScript Output** says why.
 
 Install all three together. V7 uses the manager, so without the two AddOns files NinjaTrader reports a compile error, and a compile error stops every custom script from compiling. V2–V6 don't need them. If you copy the newest `RutaCryptoMirror.cs` instead of V7, it needs the AddOns files too.
 

@@ -59,6 +59,7 @@ public static class RouterTests
 		LiveFlow(check);
 		LiveFailures(check);
 		ModesAndPersistence(check, tempDir);
+		check(!RutaPropRouter.OpenWindow(true), "router: opening the window without RutaPropManagerWindow.cs installed returns false instead of failing");
 	}
 
 	private static void DryRun(Action<bool, string> check)

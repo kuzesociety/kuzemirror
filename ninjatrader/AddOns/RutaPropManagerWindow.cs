@@ -17,9 +17,9 @@ namespace NinjaTrader.NinjaScript.AddOns
 	/// <summary>Adds "Prop Account Manager" to the Control Center's New menu.</summary>
 	public class RutaPropManager : AddOnBase
 	{
-		private static RutaPropManagerWindow openWindow;
+		private const string NewMenuId = "ControlCenterMenuItemNew";
 		private MenuItem menuItem;
-		private MenuItem newMenu;
+		private ItemsControl menuParent;
 
 		protected override void OnStateChange()
 		{
@@ -34,34 +34,134 @@ namespace NinjaTrader.NinjaScript.AddOns
 
 		protected override void OnWindowCreated(Window window)
 		{
-			if (window == null || window.GetType().Name != "ControlCenter" || menuItem != null)
+			if (window == null || menuItem != null || window.GetType().Name.IndexOf("ControlCenter", StringComparison.Ordinal) < 0)
 				return;
-			newMenu = FindMenuItem(window, "ControlCenterMenuItemNew") ?? FindMenuItemByHeader(window, "New");
-			if (newMenu == null)
+			if (TryAddMenuItem(window))
+				return;
+			// The menu bar may not be built yet: try again once the Control Center is shown
+			Action retry = () =>
 			{
-				Print("Prop Account Manager: the Control Center's New menu was not found");
-				return;
+				if (menuItem == null && !TryAddMenuItem(window))
+					Print("Prop Account Manager: could not find the Control Center's New menu. Open the manager from the strategy instead: Route to Prop Account Manager = on opens it.");
+			};
+			if (window.IsLoaded)
+				window.Dispatcher.BeginInvoke(retry, DispatcherPriority.ApplicationIdle);
+			else
+			{
+				RoutedEventHandler onLoaded = null;
+				onLoaded = (s, e) =>
+				{
+					window.Loaded -= onLoaded;
+					window.Dispatcher.BeginInvoke(retry, DispatcherPriority.ApplicationIdle);
+				};
+				window.Loaded += onLoaded;
 			}
+		}
+
+		protected override void OnWindowDestroyed(Window window)
+		{
+			if (window != null && window.GetType().Name.IndexOf("ControlCenter", StringComparison.Ordinal) >= 0)
+				RemoveMenuItem();
+		}
+
+		// Control Center > New, found the way NinjaTrader's own add-on sample does (FindFirst + automation id), then by
+		// searching the window's element trees; last resort: a top-level entry in the Control Center's menu bar
+		private bool TryAddMenuItem(Window window)
+		{
+			ItemsControl parent = null;
+			try
+			{
+				parent = NinjaTraderFindFirst(window, NewMenuId) as MenuItem;
+				if (parent == null)
+					parent = FindElement(window, d => d is MenuItem && (System.Windows.Automation.AutomationProperties.GetAutomationId(d) == NewMenuId || ((MenuItem)d).Name == NewMenuId)) as MenuItem;
+				if (parent == null)
+					parent = FindElement(window, d => d is MenuItem && ((MenuItem)d).Header is string && ((string)((MenuItem)d).Header).Replace("_", "").Trim() == "New") as MenuItem;
+				if (parent == null)
+					parent = FindElement(window, d => d is Menu) as Menu;
+			}
+			catch (Exception ex)
+			{
+				Print("Prop Account Manager: menu search failed: " + ex.Message);
+			}
+			if (parent == null)
+				return false;
 			menuItem = new MenuItem();
 			menuItem.Header = "Prop Account Manager";
 			Style style = Application.Current != null ? Application.Current.TryFindResource("MainMenuItem") as Style : null;
 			if (style != null)
 				menuItem.Style = style;
 			menuItem.Click += OnMenuItemClick;
-			newMenu.Items.Add(menuItem);
+			parent.Items.Add(menuItem);
+			menuParent = parent;
+			return true;
 		}
 
-		protected override void OnWindowDestroyed(Window window)
+		// NinjaTrader's FindFirst(window, automationId) helper, looked up at run time so this file doesn't depend on where it lives
+		private static object NinjaTraderFindFirst(Window window, string automationId)
 		{
-			if (window != null && window.GetType().Name == "ControlCenter")
-				RemoveMenuItem();
+			foreach (System.Reflection.Assembly asm in AppDomain.CurrentDomain.GetAssemblies())
+			{
+				string name = asm.GetName().Name;
+				if (name != "NinjaTrader.Gui" && name != "NinjaTrader.Core")
+					continue;
+				Type[] types;
+				try { types = asm.GetTypes(); }
+				catch (System.Reflection.ReflectionTypeLoadException ex) { types = ex.Types.Where(t => t != null).ToArray(); }
+				foreach (Type t in types)
+				{
+					if (!t.IsAbstract || !t.IsSealed)		// static classes only (extension methods)
+						continue;
+					foreach (System.Reflection.MethodInfo m in t.GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static))
+					{
+						if (m.Name != "FindFirst" || m.IsGenericMethodDefinition)
+							continue;
+						System.Reflection.ParameterInfo[] p = m.GetParameters();
+						if (p.Length == 2 && p[1].ParameterType == typeof(string) && p[0].ParameterType.IsInstanceOfType(window))
+						{
+							try { return m.Invoke(null, new object[] { window, automationId }); }
+							catch (Exception) { return null; }
+						}
+					}
+				}
+			}
+			return null;
+		}
+
+		// Breadth-first search over the logical AND visual trees (menu bars often sit in the window's template)
+		private static DependencyObject FindElement(DependencyObject root, Func<DependencyObject, bool> match)
+		{
+			HashSet<DependencyObject> seen = new HashSet<DependencyObject>();
+			Queue<DependencyObject> queue = new Queue<DependencyObject>();
+			queue.Enqueue(root);
+			while (queue.Count > 0 && seen.Count < 50000)
+			{
+				DependencyObject node = queue.Dequeue();
+				if (node == null || !seen.Add(node))
+					continue;
+				if (match(node))
+					return node;
+				foreach (object child in LogicalTreeHelper.GetChildren(node))
+				{
+					DependencyObject d = child as DependencyObject;
+					if (d != null)
+						queue.Enqueue(d);
+				}
+				if (node is Visual || node is System.Windows.Media.Media3D.Visual3D)
+				{
+					int n = VisualTreeHelper.GetChildrenCount(node);
+					for (int i = 0; i < n; i++)
+						queue.Enqueue(VisualTreeHelper.GetChild(node, i));
+				}
+			}
+			return null;
 		}
 
 		private void RemoveMenuItem()
 		{
-			MenuItem item = menuItem, parent = newMenu;
+			MenuItem item = menuItem;
+			ItemsControl parent = menuParent;
 			menuItem = null;
-			newMenu = null;
+			menuParent = null;
 			if (item == null || parent == null)
 				return;
 			Action remove = () =>
@@ -78,49 +178,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 
 		private void OnMenuItemClick(object sender, RoutedEventArgs e)
 		{
-			if (openWindow != null && openWindow.IsLoaded)
-			{
-				if (openWindow.WindowState == WindowState.Minimized)
-					openWindow.WindowState = WindowState.Normal;
-				openWindow.Activate();
-				return;
-			}
-			openWindow = new RutaPropManagerWindow();
-			openWindow.Closed += (s, a) => openWindow = null;
-			openWindow.Show();
-		}
-
-		// The menu's automation id (what NinjaTrader's own add-on sample uses), searched in the logical tree
-		private static MenuItem FindMenuItem(DependencyObject node, string automationId)
-		{
-			if (node == null)
-				return null;
-			MenuItem item = node as MenuItem;
-			if (item != null && (System.Windows.Automation.AutomationProperties.GetAutomationId(item) == automationId || item.Name == automationId))
-				return item;
-			foreach (object child in LogicalTreeHelper.GetChildren(node))
-			{
-				MenuItem found = FindMenuItem(child as DependencyObject, automationId);
-				if (found != null)
-					return found;
-			}
-			return null;
-		}
-
-		private static MenuItem FindMenuItemByHeader(DependencyObject node, string header)
-		{
-			if (node == null)
-				return null;
-			MenuItem item = node as MenuItem;
-			if (item != null && item.Header is string && ((string)item.Header).Replace("_", "").Trim() == header)
-				return item;
-			foreach (object child in LogicalTreeHelper.GetChildren(node))
-			{
-				MenuItem found = FindMenuItemByHeader(child as DependencyObject, header);
-				if (found != null)
-					return found;
-			}
-			return null;
+			RutaPropManagerWindow.OpenOrActivate(true);
 		}
 	}
 
@@ -147,6 +205,35 @@ namespace NinjaTrader.NinjaScript.AddOns
 			public TextBox Pnl, Best, Peak, Days;
 			public Button Ready, NewEval, Remove;
 			public double ShownPnl, ShownBest, ShownPeak, ShownDays;
+		}
+
+		private static RutaPropManagerWindow openWindow;
+
+		/// <summary>
+		/// Opens the window (one at a time) on NinjaTrader's main thread. Called by the Control Center menu, and by the
+		/// strategy (through RutaPropRouter.OpenWindow) when it starts with Route to Prop Account Manager = on.
+		/// </summary>
+		public static void OpenOrActivate(bool bringToFront)
+		{
+			Application app = Application.Current;
+			if (app == null)
+				return;
+			app.Dispatcher.BeginInvoke(new Action(() =>
+			{
+				if (openWindow != null && openWindow.IsLoaded)
+				{
+					if (bringToFront)
+					{
+						if (openWindow.WindowState == WindowState.Minimized)
+							openWindow.WindowState = WindowState.Normal;
+						openWindow.Activate();
+					}
+					return;
+				}
+				openWindow = new RutaPropManagerWindow();
+				openWindow.Closed += (s, a) => openWindow = null;
+				openWindow.Show();
+			}));
 		}
 
 		private readonly RutaPropRouter router;

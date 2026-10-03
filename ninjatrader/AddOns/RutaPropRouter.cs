@@ -185,6 +185,27 @@ namespace NinjaTrader.NinjaScript.AddOns
 			return System.IO.Path.Combine(System.IO.Path.Combine(NinjaTrader.Core.Globals.UserDataDir, "RutaCryptoMirror"), "PropAccountManager.xml");
 		}
 
+		/// <summary>
+		/// Opens the Prop Account Manager window (RutaPropManagerWindow.cs). Looked up at run time, so this file and the
+		/// strategy don't need the window code to compile. Returns false when the window file isn't installed.
+		/// </summary>
+		public static bool OpenWindow(bool bringToFront)
+		{
+			try
+			{
+				Type t = typeof(RutaPropRouter).Assembly.GetType("NinjaTrader.NinjaScript.AddOns.RutaPropManagerWindow");
+				System.Reflection.MethodInfo m = t != null ? t.GetMethod("OpenOrActivate", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static) : null;
+				if (m == null)
+					return false;
+				m.Invoke(null, new object[] { bringToFront });
+				return true;
+			}
+			catch (Exception)
+			{
+				return false;
+			}
+		}
+
 		private static DateTime SystemClock() { return DateTime.Now; }
 
 		private readonly object sync = new object();
