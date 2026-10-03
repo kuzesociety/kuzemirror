@@ -624,6 +624,8 @@ namespace NinjaTrader.NinjaScript.AddOns
 							r.Status = "OFF";
 						else if (s.Account.Length == 0)
 							r.Status = "NO ACCOUNT";
+						else if (AccountBusy(s))
+							r.Status = "ACCOUNT BUSY";
 						else if (live && !r.Connected)
 							r.Status = "NOT CONNECTED";
 						else if (live && r.Positions != 0)
@@ -632,7 +634,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 							r.Status = "CAN'T FIT";
 					}
 					r.Note = b.Note ?? "";
-					if (live && s.Trade == null && b.Status == Ready && r.Positions != 0)
+					if (live && s.Trade == null && b.Status == Ready && r.Positions != 0 && !AccountBusy(s))
 						r.Note = "position not opened by the manager - account skipped until it is flat";
 					r.OpenTrade = s.Trade != null ? Describe(s.Trade) : "";
 					r.IsNext = i == next;
@@ -677,15 +679,32 @@ namespace NinjaTrader.NinjaScript.AddOns
 			return s.Account.Length > 0 ? s.Account : "row " + (index + 1);
 		}
 
+		// NinjaTrader simulation accounts (Sim101, Sim-..., Playback101). Several rows may share one of them, to test
+		// the rotation with real simulated orders; a real account can be in the list only once.
+		public static bool IsSimulationAccount(string account)
+		{
+			account = (account ?? "").Trim();
+			return account.StartsWith("Sim", StringComparison.OrdinalIgnoreCase) || account.StartsWith("Playback", StringComparison.OrdinalIgnoreCase);
+		}
+
 		private string CheckAccountName(int index, string account)
 		{
 			account = (account ?? "").Trim();
-			if (account.Length == 0)
+			if (account.Length == 0 || IsSimulationAccount(account))
 				return null;
 			for (int i = 0; i < slots.Count; i++)
 				if (i != index && string.Equals(slots[i].Account, account, StringComparison.OrdinalIgnoreCase))
-					return "Account " + account + " is already in the list.";
+					return "Account " + account + " is already in the list. (Only simulation accounts such as Sim101 can be used by several rows.)";
 			return null;
+		}
+
+		// Another row on the same NinjaTrader account has a trade open (rows sharing a simulation account)
+		private bool AccountBusy(RutaPropSlot s)
+		{
+			foreach (RutaPropSlot o in slots)
+				if (o != s && o.Trade != null && string.Equals(o.Account, s.Account, StringComparison.OrdinalIgnoreCase))
+					return true;
+			return false;
 		}
 
 		// Max loss line as P&L: trails the highest end-of-day (or intraday) balance, stops at the starting balance
@@ -740,6 +759,8 @@ namespace NinjaTrader.NinjaScript.AddOns
 				return "no account";
 			if (s.Trade != null)
 				return "in trade";
+			if (AccountBusy(s))
+				return "account busy (another row on " + s.Account + " is in a trade)";
 			RutaPropBook b = BookOf(s);
 			if (b.Status != Ready)
 				return b.Status.ToLowerInvariant();

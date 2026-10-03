@@ -707,7 +707,8 @@ namespace NinjaTrader.NinjaScript.AddOns
 				case "TARGET REACHED":	return Brushes.Gold;
 				case "MAX LOSS HIT":	return Brushes.OrangeRed;
 				case "OFF":
-				case "NO ACCOUNT":		return Brushes.Gray;
+				case "NO ACCOUNT":
+				case "ACCOUNT BUSY":	return Brushes.Gray;
 				default:				return Brushes.Orange;		// CHECK ACCOUNT, NOT CONNECTED, OPEN POSITION
 			}
 		}

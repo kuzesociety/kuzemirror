@@ -291,7 +291,11 @@ Group 10 only **simulates** accounts on the chart. The Prop Account Manager is a
 5. Strategy V7 on the chart (MNQ, 5 min): group 11 **Route to Prop Account Manager** = on, and group 1 **Exit Execution = StopTargetOrders**. The manager always uses real stop/target orders, and this setting makes the chart and backtests match them. Enable the strategy. Trades are routed from the **first live bar**, never from history.
 6. Watch it in DRY RUN. When you're happy, press **Go LIVE** and confirm.
 
-**Test on simulated accounts first.** Add NinjaTrader **Sim** accounts (Control Center → Accounts → right-click → Add Simulation Account, e.g. Sim-TS1, Sim-TS2…), give them the plans you use, and run LIVE on them for a few days. With **Market Replay** (Playback connection), add `Playback101` to test LIVE quickly. Then switch the rows to your real accounts.
+**Testing without any prop account** (free NinjaTrader, delayed data is fine):
+* **DRY RUN with made-up names:** type any names in the Account cells (`TS-1` … `LU-5`) and pick their plans. DRY RUN never checks that an account exists, so 10 rows test the rotation, the daily goal / loss and every firm rule on the strategy's live signals.
+* **Real orders on `Sim101`:** several rows may use the same **simulation** account (`Sim101`, any `Sim…` account, `Playback101`). Put `Sim101` in up to 10 rows with different plans and press Go LIVE. Each trade then really goes through NinjaTrader's simulator (entry, stop + target, exit) and is booked to its row. A row waits (`ACCOUNT BUSY`) while another row's trade is open on the same account. A real account can only be in one row.
+* **Faster: Market Replay.** Download replay data (Control Center → Tools → Historical Data, Market Replay), connect to **Playback Connection**, use `Playback101` in the rows, and play past days at high speed.
+* Delayed data only makes the fills late, which doesn't matter for a test. When done, press **New eval** on each row, or Remove them, before adding your real accounts.
 
 **Reading the window**
 * Top: mode (**DRY RUN** / **LIVE**), *Go LIVE / Back to DRY RUN*, *Paused* (new signals are skipped; open trades keep their stop/target), **FLATTEN ALL**, and the status line: accounts ready, next account, open trades, current session.

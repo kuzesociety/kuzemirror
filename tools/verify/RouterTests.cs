@@ -60,6 +60,37 @@ public static class RouterTests
 		LiveFailures(check);
 		ModesAndPersistence(check, tempDir);
 		check(!RutaPropRouter.OpenWindow(true), "router: opening the window without RutaPropManagerWindow.cs installed returns false instead of failing");
+		SharedSimAccount(check);
+	}
+
+	// Ten "prop accounts" tested on the one free Sim101 account
+	private static void SharedSimAccount(Action<bool, string> check)
+	{
+		Env e = Make(null, RutaPropMode.DryRun, "Topstep50K");
+		e.B.Connected.Add("Sim101");
+		e.B.Connected.Add("Real-1");
+		bool all = true;
+		for (int k = 0; k < 10; k++)
+			all &= e.R.AddSlot("Sim101", k < 5 ? "Topstep50K" : "LucidFlex50K") == null;
+		check(all && e.R.AddSlot("Real-1", "Topstep50K") == null && e.R.AddSlot("real-1", "Topstep50K") != null,
+			"router: 10 rows can share Sim101 for testing; a real account can only be listed once");
+		e.R.RemoveSlot(10);
+		e.R.SetMode(RutaPropMode.Live);
+		double[] exits = { 20050, 19900, 20050, 20050, 19900, 20050, 20050, 20050, 20050, 20050, 20050, 20050 };
+		for (int k = 0; k < exits.Length; k++)
+		{
+			e.R.Enter("s", e.I, 1, 1, 100, 50, 20000, 2);
+			e.Price(20000);
+			e.R.Enter("t", e.I, -1, 1, 100, 50, 20000, 2);		// a second strategy while Sim101 is in a trade
+			if (k == 0)
+				check(e.LogHas("account busy (another row on Sim101 is in a trade)") && e.B.Orders.Count(o => o.Kind == "MKT") == 1,
+					"router: a second trade is never sent to Sim101 while another row's trade is open there");
+			e.Price(exits[k]);
+			e.Wait(0.3);
+		}
+		List<RutaPropRow> rows = e.R.Rows();
+		check(rows.Count(r => r.Trades > 0) == 10 && rows.Sum(r => r.Trades) == 12 && Math.Abs(rows.Sum(r => r.Pnl) - e.B.Realized["Sim101"]) < 1e-9 && e.B.Pos["Sim101"] == 0,
+			"router: 12 trades rotate over the 10 rows on Sim101, each booked to its row; total = Sim101's realized P&L (" + RutaPropRouter.Money(e.B.Realized["Sim101"]) + ")");
 	}
 
 	private static void DryRun(Action<bool, string> check)
